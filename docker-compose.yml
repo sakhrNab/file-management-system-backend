@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # Backend API - File Manager
+  backend:
+    build:
+      context: .
+      dockerfile: infrastructure/Dockerfile.backend
+    container_name: file_manager_backend_prod
+    environment:
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-admin123}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-this-in-production}
+      - BASE_URL=${BASE_URL:-http://localhost:8003}
+      - UPLOAD_DIR=/app/uploads
+      - PORT=8003
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - file_manager_network
+
+networks:
+  file_manager_network:
+    driver: bridge
