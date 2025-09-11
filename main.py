@@ -159,7 +159,45 @@ async def lifespan(app: FastAPI):
     # Shutdown (if needed)
     pass
 
-app = FastAPI(title="File Manager API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="AI Wave Rider File Manager API",
+    description="""
+    ## 🚀 AI Wave Rider File Management System
+    
+    A comprehensive file management API with JWT authentication, designed for managing social media content across multiple platforms.
+    
+    ### 🔐 Authentication
+    All protected endpoints require a JWT token obtained from `/auth/login`. Include the token in the Authorization header:
+    ```
+    Authorization: Bearer <your_jwt_token>
+    ```
+    
+    ### 📁 Supported Platforms
+    - **Instagram**: ai.waverider, ai.wave.rider, ai.uprise
+    - **TikTok**: ai.waverider, ai.wave.rider, aiwaverider9, health
+    
+    ### 📂 Content Types
+    - **Videos**: MP4, MOV, AVI, etc.
+    - **Images**: JPG, PNG, GIF, WebP, etc.
+    
+    ### 🔒 Security Features
+    - JWT-based authentication
+    - Path traversal protection
+    - File type validation
+    - Secure file upload/download
+    """,
+    version="1.0.0",
+    lifespan=lifespan,
+    contact={
+        "name": "AI Wave Rider Support",
+        "url": "https://aiwaverider.com",
+        "email": "support@aiwaverider.com",
+    },
+    license_info={
+        "name": "MIT License",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+)
 
 # CORS middleware
 app.add_middleware(
@@ -245,12 +283,42 @@ def get_folder_contents(folder_path: str) -> FolderStatus:
 
 # API Endpoints
 
-@app.get("/")
+@app.get("/", 
+         tags=["🏠 System"],
+         summary="API Root",
+         description="Returns basic API information and version details.")
 async def root():
+    """
+    ## 🏠 API Root Endpoint
+    
+    Returns basic information about the File Manager API including version and status.
+    
+    **Use Case**: Health check and API discovery
+    **Authentication**: None required
+    """
     return {"message": "File Manager API", "version": "1.0.0"}
 
-@app.get("/health")
+@app.get("/health", 
+         tags=["🏠 System"],
+         summary="Health Check",
+         description="Comprehensive health check endpoint for monitoring and load balancers.")
 async def health_check():
+    """
+    ## 🏥 Health Check Endpoint
+    
+    Returns detailed health status including:
+    - Application status
+    - Timestamp
+    - Version information
+    - Upload directory path
+    
+    **Use Case**: 
+    - Load balancer health checks
+    - Monitoring systems
+    - Docker health checks
+    
+    **Authentication**: None required
+    """
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -258,17 +326,63 @@ async def health_check():
         "upload_dir": UPLOAD_DIR
     }
 
-@app.get("/test-auth")
+@app.get("/test-auth", 
+         tags=["🔐 Authentication"],
+         summary="Test Authentication",
+         description="Test endpoint to verify JWT authentication is working correctly.")
 async def test_auth(current_user: str = Depends(verify_token)):
+    """
+    ## 🔐 Authentication Test Endpoint
+    
+    Verifies that JWT authentication is working correctly and returns the authenticated user's username.
+    
+    **Use Case**: 
+    - Testing authentication setup
+    - Verifying token validity
+    - Debugging auth issues
+    
+    **Authentication**: JWT token required
+    **Headers**: `Authorization: Bearer <token>`
+    """
     return {"message": f"Hello {current_user}, authentication is working!"}
 
-@app.get("/test-simple")
+@app.get("/test-simple", 
+         tags=["🏠 System"],
+         summary="Simple Test",
+         description="Basic test endpoint without authentication requirements.")
 async def test_simple():
+    """
+    ## 🧪 Simple Test Endpoint
+    
+    Basic test endpoint that doesn't require authentication.
+    
+    **Use Case**: 
+    - API connectivity testing
+    - Basic functionality verification
+    - Development testing
+    
+    **Authentication**: None required
+    """
     return {"message": "Simple test endpoint is working!"}
 
-@app.get("/debug/env")
+@app.get("/debug/env", 
+         tags=["🔧 Debug"],
+         summary="Environment Debug",
+         description="Debug endpoint to check environment variables (sensitive values are masked).")
 async def debug_environment():
-    """Debug endpoint to check environment variables"""
+    """
+    ## 🔧 Environment Debug Endpoint
+    
+    Returns current environment configuration with sensitive values masked for security.
+    
+    **Use Case**: 
+    - Debugging configuration issues
+    - Verifying environment setup
+    - Troubleshooting deployment problems
+    
+    **Authentication**: None required
+    **Security**: Sensitive values are masked with `***`
+    """
     return {
         "AUTH_USERNAME": AUTH_USERNAME,
         "AUTH_PASSWORD": "***" if AUTH_PASSWORD else None,
@@ -277,9 +391,34 @@ async def debug_environment():
         "UPLOAD_DIR": UPLOAD_DIR
     }
 
-@app.post("/auth/login", response_model=TokenResponse)
+@app.post("/auth/login", 
+          response_model=TokenResponse,
+          tags=["🔐 Authentication"],
+          summary="User Login",
+          description="Authenticate user and receive JWT token for API access.")
 async def login(login_data: LoginRequest):
-    """Login and get JWT token"""
+    """
+    ## 🔐 User Login Endpoint
+    
+    Authenticates a user with username and password, returning a JWT token for subsequent API calls.
+    
+    **Request Body**:
+    - `username`: User's username
+    - `password`: User's password
+    
+    **Response**:
+    - `access_token`: JWT token for authentication
+    - `token_type`: Always "bearer"
+    - `expires_in`: Token expiration time in seconds (1800 = 30 minutes)
+    
+    **Use Case**: 
+    - Initial user authentication
+    - Getting API access token
+    - Session management
+    
+    **Authentication**: None required (this is the login endpoint)
+    **Token Expiry**: 30 minutes
+    """
     # Debug logging
     logger.info(f"Login attempt for username: {login_data.username}")
     logger.info(f"AUTH_USERNAME from env: {AUTH_USERNAME}")
@@ -314,9 +453,34 @@ async def login(login_data: LoginRequest):
 
 
 # Folder Management
-@app.post("/api/folders", response_model=WebhookResponse)
+@app.post("/api/folders", 
+          response_model=WebhookResponse,
+          tags=["📁 Folder Management"],
+          summary="Create Folder",
+          description="Create a new folder in the specified parent directory.")
 async def create_folder(folder: FolderCreate, current_user: str = Depends(verify_token)):
-    """Create a new folder"""
+    """
+    ## 📁 Create Folder Endpoint
+    
+    Creates a new folder in the specified parent directory. If no parent_path is provided, creates in root.
+    
+    **Request Body**:
+    - `name`: Name of the new folder
+    - `parent_path`: Parent directory path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains the new folder path
+    
+    **Use Case**: 
+    - Organizing content by platform/account
+    - Creating project directories
+    - Setting up folder structure
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         # Handle empty parent_path (root)
         if not folder.parent_path or folder.parent_path.strip() == "":
@@ -341,9 +505,32 @@ async def create_folder(folder: FolderCreate, current_user: str = Depends(verify
         logger.error(f"Error creating folder: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/folders")
+@app.delete("/api/folders", 
+            tags=["📁 Folder Management"],
+            summary="Delete Folder",
+            description="Delete a folder and all its contents recursively.")
 async def delete_folder(folder_path: str, current_user: str = Depends(verify_token)):
-    """Delete a folder"""
+    """
+    ## 🗑️ Delete Folder Endpoint
+    
+    Permanently deletes a folder and all its contents (files and subfolders).
+    
+    **Query Parameters**:
+    - `folder_path`: Path to the folder to delete
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    
+    **Use Case**: 
+    - Cleaning up old content
+    - Removing unused directories
+    - Content management
+    
+    **Authentication**: JWT token required
+    **Warning**: This action is irreversible
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         full_path = get_full_path(folder_path)
         
@@ -364,9 +551,34 @@ async def delete_folder(folder_path: str, current_user: str = Depends(verify_tok
         logger.error(f"Error deleting folder: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put("/api/folders/rename", response_model=WebhookResponse)
+@app.put("/api/folders/rename", 
+          response_model=WebhookResponse,
+          tags=["📁 Folder Management"],
+          summary="Rename Folder",
+          description="Rename an existing folder.")
 async def rename_folder(rename_data: FolderRename, current_user: str = Depends(verify_token)):
-    """Rename a folder"""
+    """
+    ## 📝 Rename Folder Endpoint
+    
+    Renames an existing folder to a new name within the same parent directory.
+    
+    **Request Body**:
+    - `old_name`: Current name of the folder
+    - `new_name`: New name for the folder
+    - `parent_path`: Parent directory path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    
+    **Use Case**: 
+    - Updating folder names
+    - Content organization
+    - Project restructuring
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         parent_path = get_full_path(rename_data.parent_path)
         old_path = os.path.join(parent_path, rename_data.old_name)
@@ -390,14 +602,43 @@ async def rename_folder(rename_data: FolderRename, current_user: str = Depends(v
         raise HTTPException(status_code=500, detail=str(e))
 
 # File Management
-@app.post("/api/files/upload")
+@app.post("/api/files/upload",
+          tags=["📄 File Management"],
+          summary="Upload File",
+          description="Upload a file to the specified folder with automatic duplicate handling.")
 async def upload_file(
     file: UploadFile = File(...),
     folder_path: str = Form(""),
     webhook: bool = Form(False),
     current_user: str = Depends(verify_token)
 ):
-    """Upload a file"""
+    """
+    ## 📤 Upload File Endpoint
+    
+    Uploads a file to the specified folder. If a file with the same name exists, 
+    it automatically appends a number to create a unique filename.
+    
+    **Form Data**:
+    - `file`: The file to upload (multipart/form-data)
+    - `folder_path`: Target folder path (optional, defaults to root)
+    - `webhook`: Return webhook response format (optional, defaults to false)
+    
+    **Response**:
+    - `filename`: Name of the uploaded file
+    - `path`: Relative path to the uploaded file
+    - `size`: File size in bytes
+    - `url`: Direct download URL for the file
+    
+    **Use Case**: 
+    - Uploading social media content
+    - Adding new files to projects
+    - Content management workflows
+    
+    **Authentication**: JWT token required
+    **File Types**: All file types supported
+    **Duplicate Handling**: Automatic filename conflict resolution
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         target_folder = get_full_path(folder_path)
         
@@ -444,9 +685,32 @@ async def upload_file(
         logger.error(f"Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/files/download/{file_path:path}")
+@app.get("/api/files/download/{file_path:path}",
+          tags=["📄 File Management"],
+          summary="Download File",
+          description="Download a file by its path with proper MIME type handling.")
 async def download_file(file_path: str, current_user: str = Depends(verify_token)):
-    """Download a file"""
+    """
+    ## 📥 Download File Endpoint
+    
+    Downloads a file by its relative path. Returns the file with appropriate MIME type headers.
+    
+    **Path Parameters**:
+    - `file_path`: Relative path to the file (e.g., `/videos/instagram/ai.waverider/video.mp4`)
+    
+    **Response**:
+    - File content with appropriate Content-Type header
+    - File name in Content-Disposition header
+    
+    **Use Case**: 
+    - Accessing uploaded content
+    - Serving files to frontend applications
+    - Direct file downloads
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    **MIME Types**: Automatically detected based on file extension
+    """
     try:
         full_path = get_full_path(file_path)
         
@@ -461,9 +725,34 @@ async def download_file(file_path: str, current_user: str = Depends(verify_token
         logger.error(f"Error downloading file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/files")
+@app.delete("/api/files",
+            tags=["📄 File Management"],
+            summary="Delete File",
+            description="Delete a file by its path.")
 async def delete_file(file_path: str, webhook: bool = False, current_user: str = Depends(verify_token)):
-    """Delete a file"""
+    """
+    ## 🗑️ Delete File Endpoint
+    
+    Permanently deletes a file from the storage.
+    
+    **Query Parameters**:
+    - `file_path`: Path to the file to delete
+    - `webhook`: Return webhook response format (optional, defaults to false)
+    
+    **Response**:
+    - `success`: Boolean indicating success (webhook format)
+    - `message`: Success/error message (webhook format)
+    - OR simple success message (standard format)
+    
+    **Use Case**: 
+    - Removing outdated content
+    - Cleaning up storage
+    - Content lifecycle management
+    
+    **Authentication**: JWT token required
+    **Warning**: This action is irreversible
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         full_path = get_full_path(file_path)
         
@@ -488,14 +777,40 @@ async def delete_file(file_path: str, webhook: bool = False, current_user: str =
         logger.error(f"Error deleting file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.put("/api/files/rename")
+@app.put("/api/files/rename",
+          tags=["📄 File Management"],
+          summary="Rename File",
+          description="Rename an existing file.")
 async def rename_file(
     old_path: str,
     new_name: str,
     webhook: bool = False,
     current_user: str = Depends(verify_token)
 ):
-    """Rename a file"""
+    """
+    ## 📝 Rename File Endpoint
+    
+    Renames an existing file to a new name within the same directory.
+    
+    **Query Parameters**:
+    - `old_path`: Current path to the file
+    - `new_name`: New name for the file
+    - `webhook`: Return webhook response format (optional, defaults to false)
+    
+    **Response**:
+    - `success`: Boolean indicating success (webhook format)
+    - `message`: Success/error message (webhook format)
+    - `data`: Contains new file path (webhook format)
+    - OR simple success message (standard format)
+    
+    **Use Case**: 
+    - Updating file names
+    - Content organization
+    - File management workflows
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         old_full_path = get_full_path(old_path)
         new_full_path = os.path.join(os.path.dirname(old_full_path), new_name)
@@ -523,9 +838,41 @@ async def rename_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Status and listing endpoints
-@app.get("/api/folders/status", response_model=FolderStatus)
+@app.get("/api/folders/status", 
+         response_model=FolderStatus,
+         tags=["📊 Status & Discovery"],
+         summary="Get Folder Status",
+         description="Get detailed information about a folder including files and subfolders.")
 async def get_folder_status(folder_path: str = "", current_user: str = Depends(verify_token)):
-    """Get folder status and contents"""
+    """
+    ## 📊 Folder Status Endpoint
+    
+    Returns detailed information about a folder including all files and subfolders.
+    
+    **Query Parameters**:
+    - `folder_path`: Path to the folder (optional, defaults to root)
+    
+    **Response**:
+    - `path`: Relative path to the folder
+    - `files`: Array of file information objects
+    - `subfolders`: Array of subfolder names
+    
+    **File Information**:
+    - `name`: File name
+    - `path`: Relative file path
+    - `size`: File size in bytes
+    - `modified`: Last modified timestamp (ISO format)
+    - `type`: Always "file"
+    
+    **Use Case**: 
+    - Browsing folder contents
+    - Building file explorers
+    - Content discovery
+    - Dashboard displays
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    """
     try:
         logger.info(f"get_folder_status called with folder_path: '{folder_path}'")
         
@@ -551,9 +898,40 @@ async def get_folder_status(folder_path: str = "", current_user: str = Depends(v
         logger.error(f"Error getting folder status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/files/list")
+@app.get("/api/files/list",
+         tags=["📊 Status & Discovery"],
+         summary="List All Files",
+         description="List all files recursively in a folder and its subfolders.")
 async def list_all_files(folder_path: str = "", current_user: str = Depends(verify_token)):
-    """List all files recursively"""
+    """
+    ## 📋 List All Files Endpoint
+    
+    Recursively lists all files in a folder and its subfolders.
+    
+    **Query Parameters**:
+    - `folder_path`: Path to the folder (optional, defaults to root)
+    
+    **Response**:
+    - `files`: Array of all file information objects
+    - `count`: Total number of files found
+    
+    **File Information**:
+    - `name`: File name
+    - `path`: Relative file path
+    - `size`: File size in bytes
+    - `modified`: Last modified timestamp (ISO format)
+    - `type`: Always "file"
+    
+    **Use Case**: 
+    - Search functionality
+    - File indexing
+    - Content analysis
+    - Bulk operations
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    **Performance**: May be slow for large directory structures
+    """
     try:
         full_path = get_full_path(folder_path)
         
@@ -576,21 +954,55 @@ async def list_all_files(folder_path: str = "", current_user: str = Depends(veri
 
 # Webhook endpoints
 
-@app.post("/webhook/files/upload", response_model=WebhookResponse)
+@app.post("/webhook/files/upload", 
+          response_model=WebhookResponse,
+          tags=["🔗 Webhooks"],
+          summary="Webhook File Upload",
+          description="Webhook endpoint for file upload with standardized response format.")
 async def webhook_upload_file(
     file: UploadFile = File(...),
     folder_path: str = Form(""),
     current_user: str = Depends(verify_token)
 ):
-    """Webhook for file upload"""
+    """
+    ## 🔗 Webhook File Upload Endpoint
+    
+    Webhook version of file upload that returns a standardized webhook response format.
+    
+    **Form Data**:
+    - `file`: The file to upload (multipart/form-data)
+    - `folder_path`: Target folder path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains file information (filename, path, size, url)
+    
+    **Use Case**: 
+    - Third-party integrations
+    - Automated workflows
+    - External system notifications
+    - Webhook-based file processing
+    
+    **Authentication**: JWT token required
+    **Response Format**: Standardized webhook format
+    """
     return await upload_file(file, folder_path, webhook=True)
 
-@app.post("/webhook/files/delete", response_model=WebhookResponse)
+@app.post("/webhook/files/delete", 
+          response_model=WebhookResponse,
+          tags=["🔗 Webhooks"],
+          summary="Webhook File Delete",
+          description="Webhook endpoint for file deletion with standardized response format.")
 async def webhook_delete_file(file_path: str = Form(...), current_user: str = Depends(verify_token)):
     """Webhook for file deletion"""
     return await delete_file(file_path, webhook=True)
 
-@app.post("/webhook/files/rename", response_model=WebhookResponse)
+@app.post("/webhook/files/rename", 
+          response_model=WebhookResponse,
+          tags=["🔗 Webhooks"],
+          summary="Webhook File Rename",
+          description="Webhook endpoint for file renaming with standardized response format.")
 async def webhook_rename_file(
     old_path: str = Form(...),
     new_name: str = Form(...),
@@ -599,22 +1011,38 @@ async def webhook_rename_file(
     """Webhook for file rename"""
     return await rename_file(old_path, new_name, webhook=True)
 
-@app.post("/webhook/folders/create", response_model=WebhookResponse)
+@app.post("/webhook/folders/create", 
+          response_model=WebhookResponse,
+          tags=["🔗 Webhooks"],
+          summary="Webhook Folder Create",
+          description="Webhook endpoint for folder creation with standardized response format.")
 async def webhook_create_folder(folder: FolderCreate, current_user: str = Depends(verify_token)):
     """Webhook for folder creation"""
     return await create_folder(folder)
 
-@app.post("/webhook/folders/delete", response_model=WebhookResponse)
+@app.post("/webhook/folders/delete", 
+          response_model=WebhookResponse,
+          tags=["🔗 Webhooks"],
+          summary="Webhook Folder Delete",
+          description="Webhook endpoint for folder deletion with standardized response format.")
 async def webhook_delete_folder(folder_path: str = Form(...), current_user: str = Depends(verify_token)):
     """Webhook for folder deletion"""
     return await delete_folder(folder_path)
 
-@app.post("/webhook/folders/rename", response_model=WebhookResponse)
+@app.post("/webhook/folders/rename", 
+          response_model=WebhookResponse,
+          tags=["🔗 Webhooks"],
+          summary="Webhook Folder Rename",
+          description="Webhook endpoint for folder renaming with standardized response format.")
 async def webhook_rename_folder(rename_data: FolderRename, current_user: str = Depends(verify_token)):
     """Webhook for folder rename"""
     return await rename_folder(rename_data)
 
-@app.get("/webhook/folders/status", response_model=WebhookResponse)
+@app.get("/webhook/folders/status", 
+         response_model=WebhookResponse,
+         tags=["🔗 Webhooks"],
+         summary="Webhook Folder Status",
+         description="Webhook endpoint for folder status with standardized response format.")
 async def webhook_folder_status(folder_path: str = "", current_user: str = Depends(verify_token)):
     """Webhook for folder status"""
     try:
