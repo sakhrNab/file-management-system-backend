@@ -13,7 +13,6 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-this-in-production}
       - BASE_URL=${BASE_URL:-https://drive.aiwaverider.com}
       - UPLOAD_DIR=/app/uploads
-      - PORT=8003
     ports:
       - "8003:8003"
     volumes:
