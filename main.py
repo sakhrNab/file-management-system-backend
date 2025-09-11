@@ -295,7 +295,7 @@ app.add_middleware(
 
 # Middleware to protect documentation endpoints
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 @app.middleware("http")
 async def protect_docs_middleware(request: Request, call_next):
@@ -304,14 +304,99 @@ async def protect_docs_middleware(request: Request, call_next):
         # Check if Authorization header is present
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": "Authentication required to access documentation",
-                    "message": "Please authenticate first using /auth/login endpoint",
-                    "login_url": "/auth/login"
-                }
-            )
+            # Check if this is a browser request (has Accept: text/html)
+            accept_header = request.headers.get("Accept", "")
+            print(f"DEBUG: Accept header: {accept_header}")
+            if "text/html" in accept_header:
+                # Return HTML login page for browser users
+                login_html = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>AI Wave Rider API - Authentication Required</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+                        .container { background: #f5f5f5; padding: 30px; border-radius: 10px; }
+                        .form-group { margin: 15px 0; }
+                        label { display: block; margin-bottom: 5px; font-weight: bold; }
+                        input[type="text"], input[type="password"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+                        button { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+                        button:hover { background: #0056b3; }
+                        .error { color: red; margin-top: 10px; }
+                        .success { color: green; margin-top: 10px; }
+                        .info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>🔐 AI Wave Rider API Documentation</h1>
+                        <p>Authentication required to access the API documentation.</p>
+                        
+                        <div class="info">
+                            <strong>📋 How to access:</strong><br>
+                            1. Enter your credentials below<br>
+                            2. Click "Get Access Token"<br>
+                            3. You'll be redirected to the documentation
+                        </div>
+                        
+                        <form id="loginForm">
+                            <div class="form-group">
+                                <label for="username">Username:</label>
+                                <input type="text" id="username" name="username" value="admin" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="password">Password:</label>
+                                <input type="password" id="password" name="password" required>
+                            </div>
+                            <button type="submit">Get Access Token</button>
+                        </form>
+                        
+                        <div id="message"></div>
+                        
+                        <script>
+                            document.getElementById('loginForm').addEventListener('submit', async function(e) {
+                                e.preventDefault();
+                                const username = document.getElementById('username').value;
+                                const password = document.getElementById('password').value;
+                                const messageDiv = document.getElementById('message');
+                                
+                                try {
+                                    const response = await fetch('/auth/login', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ username, password })
+                                    });
+                                    
+                                    if (response.ok) {
+                                        const data = await response.json();
+                                        // Store token in sessionStorage
+                                        sessionStorage.setItem('api_token', data.access_token);
+                                        // Redirect to docs
+                                        window.location.href = '/docs';
+                                    } else {
+                                        const error = await response.json();
+                                        messageDiv.innerHTML = '<div class="error">❌ ' + error.detail + '</div>';
+                                    }
+                                } catch (error) {
+                                    messageDiv.innerHTML = '<div class="error">❌ Login failed: ' + error.message + '</div>';
+                                }
+                            });
+                        </script>
+                    </div>
+                </body>
+                </html>
+                """
+                return HTMLResponse(content=login_html, status_code=401)
+            else:
+                # Return JSON for API clients
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "Authentication required to access documentation",
+                        "message": "Please authenticate first using /auth/login endpoint",
+                        "login_url": "/auth/login"
+                    }
+                )
         
         # Verify the token
         try:
@@ -1173,6 +1258,97 @@ async def webhook_folder_status(folder_path: str = "", current_user: str = Depen
 # Custom Protected Documentation Endpoints
 # These must be defined after all other routes to ensure they override any defaults
 
+@app.get("/login", 
+         tags=["🔒 Protected"],
+         summary="Documentation Login Page",
+         description="Login page for accessing API documentation.")
+async def get_login_page():
+    """
+    ## 🔐 Documentation Login Page
+    
+    Interactive login page for accessing the API documentation.
+    
+    **Use Case**: Browser-based access to protected documentation
+    """
+    login_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>AI Wave Rider API - Authentication Required</title>
+        <style>
+            body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+            .container { background: #f5f5f5; padding: 30px; border-radius: 10px; }
+            .form-group { margin: 15px 0; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; }
+            input[type="text"], input[type="password"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+            button { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+            button:hover { background: #0056b3; }
+            .error { color: red; margin-top: 10px; }
+            .success { color: green; margin-top: 10px; }
+            .info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🔐 AI Wave Rider API Documentation</h1>
+            <p>Authentication required to access the API documentation.</p>
+            
+            <div class="info">
+                <strong>📋 How to access:</strong><br>
+                1. Enter your credentials below<br>
+                2. Click "Get Access Token"<br>
+                3. You'll be redirected to the documentation
+            </div>
+            
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="username">Username:</label>
+                    <input type="text" id="username" name="username" value="admin" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password:</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit">Get Access Token</button>
+            </form>
+            
+            <div id="message"></div>
+            
+            <script>
+                document.getElementById('loginForm').addEventListener('submit', async function(e) {
+                    e.preventDefault();
+                    const username = document.getElementById('username').value;
+                    const password = document.getElementById('password').value;
+                    const messageDiv = document.getElementById('message');
+                    
+                    try {
+                        const response = await fetch('/auth/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username, password })
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            // Store token in sessionStorage
+                            sessionStorage.setItem('api_token', data.access_token);
+                            // Redirect to docs
+                            window.location.href = '/docs';
+                        } else {
+                            const error = await response.json();
+                            messageDiv.innerHTML = '<div class="error">❌ ' + error.detail + '</div>';
+                        }
+                    } catch (error) {
+                        messageDiv.innerHTML = '<div class="error">❌ Login failed: ' + error.message + '</div>';
+                    }
+                });
+            </script>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=login_html)
+
 @app.get("/docs", 
          tags=["🔒 Protected"],
          summary="API Documentation (Protected)",
@@ -1188,12 +1364,50 @@ async def get_docs(current_user: str = Depends(verify_token)):
     """
     from fastapi.responses import HTMLResponse
     
-    return get_swagger_ui_html(
+    # Custom Swagger UI with authentication
+    swagger_html = get_swagger_ui_html(
         openapi_url="/openapi.json",
         title="AI Wave Rider File Manager API - Documentation",
         swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
         swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
     )
+    
+    # Add custom JavaScript to handle authentication
+    custom_js = """
+    <script>
+        // Get token from sessionStorage
+        const token = sessionStorage.getItem('api_token');
+        
+        // Configure Swagger UI with authentication
+        window.onload = function() {
+            if (token) {
+                // Add authorization header to all requests
+                ui.preauthorizeApiKey('BearerAuth', token);
+                
+                // Configure Swagger UI
+                const ui = SwaggerUIBundle({
+                    url: '/openapi.json',
+                    dom_id: '#swagger-ui',
+                    presets: [
+                        SwaggerUIBundle.presets.apis,
+                        SwaggerUIBundle.presets.standalone
+                    ],
+                    requestInterceptor: function(request) {
+                        // Add authorization header to all requests
+                        request.headers['Authorization'] = 'Bearer ' + token;
+                        return request;
+                    }
+                });
+            }
+        };
+    </script>
+    """
+    
+    # Inject custom JavaScript into the HTML
+    html_content = swagger_html.body.decode('utf-8')
+    html_content = html_content.replace('</body>', custom_js + '</body>')
+    
+    return HTMLResponse(content=html_content)
 
 @app.get("/openapi.json", 
          tags=["🔒 Protected"],
@@ -1213,7 +1427,7 @@ async def get_openapi_schema(current_user: str = Depends(verify_token)):
         version=app.version,
         description=app.description,
         routes=app.routes,
-    )
+        )
 
 if __name__ == "__main__":
     import uvicorn
