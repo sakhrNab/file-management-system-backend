@@ -28,7 +28,7 @@ BASE_URL = os.getenv("BASE_URL", "https://drive.aiwaverider.com")
 # JWT Authentication
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 180 * 24 * 60  # 6 months in minutes
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -166,6 +166,34 @@ app = FastAPI(
     
     A comprehensive file management API with JWT authentication, designed for managing social media content across multiple platforms.
     
+    ## 📋 **API Workflow Sequence**
+    
+    ### **Step 1: Authentication** 🔐
+    1. **POST** `/auth/login` - Get JWT token
+    2. **GET** `/test-auth` - Verify authentication works
+    
+    ### **Step 2: System Check** 🏠
+    3. **GET** `/health` - Check API health
+    4. **GET** `/` - Basic API info
+    
+    ### **Step 3: Folder Management** 📁
+    5. **GET** `/api/folders/status` - Browse existing folders
+    6. **POST** `/api/folders` - Create new folders
+    7. **PUT** `/api/folders/rename` - Rename folders
+    8. **DELETE** `/api/folders` - Delete folders
+    
+    ### **Step 4: File Operations** 📄
+    9. **POST** `/api/files/upload` - Upload files
+    10. **GET** `/api/files/download/{file_path}` - Download files
+    11. **PUT** `/api/files/rename` - Rename files
+    12. **DELETE** `/api/files` - Delete files
+    13. **GET** `/api/files/list` - List all files
+    
+    ### **Step 5: Webhooks** 🔗
+    14. Use webhook endpoints for automated integrations
+    
+    ---
+    
     ### 🔐 Authentication
     All protected endpoints require a JWT token obtained from `/auth/login`. Include the token in the Authorization header:
     ```
@@ -185,6 +213,7 @@ app = FastAPI(
     - Path traversal protection
     - File type validation
     - Secure file upload/download
+    - Protected API documentation
     """,
     version="1.0.0",
     lifespan=lifespan,
@@ -197,7 +226,44 @@ app = FastAPI(
         "name": "MIT License",
         "url": "https://opensource.org/licenses/MIT",
     },
+    docs_url=None,  # Completely disable default docs
+    redoc_url=None,  # Disable default redoc
+    openapi_url=None,  # Completely disable default openapi
 )
+
+# Override FastAPI's default OpenAPI schema generation
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    
+    # Add security scheme
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        }
+    }
+    
+    # Add security requirement to all protected endpoints
+    for path in openapi_schema["paths"]:
+        for method in openapi_schema["paths"][path]:
+            if method in ["get", "post", "put", "delete", "patch"]:
+                endpoint = openapi_schema["paths"][path][method]
+                if "tags" in endpoint and "🔒 Protected" in endpoint.get("tags", []):
+                    endpoint["security"] = [{"BearerAuth": []}]
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # CORS middleware
 app.add_middleware(
@@ -226,6 +292,46 @@ app.add_middleware(
         "X-API-Key",
     ],
 )
+
+# Middleware to protect documentation endpoints
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.middleware("http")
+async def protect_docs_middleware(request: Request, call_next):
+    """Middleware to protect documentation endpoints"""
+    if request.url.path in ["/docs", "/openapi.json"]:
+        # Check if Authorization header is present
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Authentication required to access documentation",
+                    "message": "Please authenticate first using /auth/login endpoint",
+                    "login_url": "/auth/login"
+                }
+            )
+        
+        # Verify the token
+        try:
+            token = auth_header.split(" ")[1]
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            username: str = payload.get("sub")
+            if username is None:
+                raise HTTPException(status_code=401, detail="Invalid token")
+        except jwt.PyJWTError:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Invalid or expired token",
+                    "message": "Please authenticate again using /auth/login endpoint",
+                    "login_url": "/auth/login"
+                }
+            )
+    
+    response = await call_next(request)
+    return response
 
 # Security
 security = HTTPBearer()
@@ -283,8 +389,13 @@ def get_folder_contents(folder_path: str) -> FolderStatus:
 
 # API Endpoints
 
+# Override default FastAPI docs to require authentication
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+
+
 @app.get("/", 
-         tags=["🏠 System"],
+         tags=["2️⃣ System"],
          summary="API Root",
          description="Returns basic API information and version details.")
 async def root():
@@ -299,7 +410,7 @@ async def root():
     return {"message": "File Manager API", "version": "1.0.0"}
 
 @app.get("/health", 
-         tags=["🏠 System"],
+         tags=["2️⃣ System"],
          summary="Health Check",
          description="Comprehensive health check endpoint for monitoring and load balancers.")
 async def health_check():
@@ -327,7 +438,7 @@ async def health_check():
     }
 
 @app.get("/test-auth", 
-         tags=["🔐 Authentication"],
+         tags=["1️⃣ Authentication"],
          summary="Test Authentication",
          description="Test endpoint to verify JWT authentication is working correctly.")
 async def test_auth(current_user: str = Depends(verify_token)):
@@ -347,7 +458,7 @@ async def test_auth(current_user: str = Depends(verify_token)):
     return {"message": f"Hello {current_user}, authentication is working!"}
 
 @app.get("/test-simple", 
-         tags=["🏠 System"],
+         tags=["2️⃣ System"],
          summary="Simple Test",
          description="Basic test endpoint without authentication requirements.")
 async def test_simple():
@@ -366,7 +477,7 @@ async def test_simple():
     return {"message": "Simple test endpoint is working!"}
 
 @app.get("/debug/env", 
-         tags=["🔧 Debug"],
+         tags=["2️⃣ System"],
          summary="Environment Debug",
          description="Debug endpoint to check environment variables (sensitive values are masked).")
 async def debug_environment():
@@ -393,7 +504,7 @@ async def debug_environment():
 
 @app.post("/auth/login", 
           response_model=TokenResponse,
-          tags=["🔐 Authentication"],
+          tags=["1️⃣ Authentication"],
           summary="User Login",
           description="Authenticate user and receive JWT token for API access.")
 async def login(login_data: LoginRequest):
@@ -455,7 +566,7 @@ async def login(login_data: LoginRequest):
 # Folder Management
 @app.post("/api/folders", 
           response_model=WebhookResponse,
-          tags=["📁 Folder Management"],
+          tags=["3️⃣ Folder Management"],
           summary="Create Folder",
           description="Create a new folder in the specified parent directory.")
 async def create_folder(folder: FolderCreate, current_user: str = Depends(verify_token)):
@@ -506,7 +617,7 @@ async def create_folder(folder: FolderCreate, current_user: str = Depends(verify
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/folders", 
-            tags=["📁 Folder Management"],
+            tags=["3️⃣ Folder Management"],
             summary="Delete Folder",
             description="Delete a folder and all its contents recursively.")
 async def delete_folder(folder_path: str, current_user: str = Depends(verify_token)):
@@ -553,7 +664,7 @@ async def delete_folder(folder_path: str, current_user: str = Depends(verify_tok
 
 @app.put("/api/folders/rename", 
           response_model=WebhookResponse,
-          tags=["📁 Folder Management"],
+          tags=["3️⃣ Folder Management"],
           summary="Rename Folder",
           description="Rename an existing folder.")
 async def rename_folder(rename_data: FolderRename, current_user: str = Depends(verify_token)):
@@ -603,7 +714,7 @@ async def rename_folder(rename_data: FolderRename, current_user: str = Depends(v
 
 # File Management
 @app.post("/api/files/upload",
-          tags=["📄 File Management"],
+          tags=["4️⃣ File Management"],
           summary="Upload File",
           description="Upload a file to the specified folder with automatic duplicate handling.")
 async def upload_file(
@@ -686,7 +797,7 @@ async def upload_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/files/download/{file_path:path}",
-          tags=["📄 File Management"],
+          tags=["4️⃣ File Management"],
           summary="Download File",
           description="Download a file by its path with proper MIME type handling.")
 async def download_file(file_path: str, current_user: str = Depends(verify_token)):
@@ -726,7 +837,7 @@ async def download_file(file_path: str, current_user: str = Depends(verify_token
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/files",
-            tags=["📄 File Management"],
+            tags=["4️⃣ File Management"],
             summary="Delete File",
             description="Delete a file by its path.")
 async def delete_file(file_path: str, webhook: bool = False, current_user: str = Depends(verify_token)):
@@ -778,7 +889,7 @@ async def delete_file(file_path: str, webhook: bool = False, current_user: str =
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/files/rename",
-          tags=["📄 File Management"],
+          tags=["4️⃣ File Management"],
           summary="Rename File",
           description="Rename an existing file.")
 async def rename_file(
@@ -840,7 +951,7 @@ async def rename_file(
 # Status and listing endpoints
 @app.get("/api/folders/status", 
          response_model=FolderStatus,
-         tags=["📊 Status & Discovery"],
+         tags=["3️⃣ Folder Management"],
          summary="Get Folder Status",
          description="Get detailed information about a folder including files and subfolders.")
 async def get_folder_status(folder_path: str = "", current_user: str = Depends(verify_token)):
@@ -899,7 +1010,7 @@ async def get_folder_status(folder_path: str = "", current_user: str = Depends(v
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/files/list",
-         tags=["📊 Status & Discovery"],
+         tags=["4️⃣ File Management"],
          summary="List All Files",
          description="List all files recursively in a folder and its subfolders.")
 async def list_all_files(folder_path: str = "", current_user: str = Depends(verify_token)):
@@ -956,7 +1067,7 @@ async def list_all_files(folder_path: str = "", current_user: str = Depends(veri
 
 @app.post("/webhook/files/upload", 
           response_model=WebhookResponse,
-          tags=["🔗 Webhooks"],
+          tags=["5️⃣ Webhooks"],
           summary="Webhook File Upload",
           description="Webhook endpoint for file upload with standardized response format.")
 async def webhook_upload_file(
@@ -991,7 +1102,7 @@ async def webhook_upload_file(
 
 @app.post("/webhook/files/delete", 
           response_model=WebhookResponse,
-          tags=["🔗 Webhooks"],
+          tags=["5️⃣ Webhooks"],
           summary="Webhook File Delete",
           description="Webhook endpoint for file deletion with standardized response format.")
 async def webhook_delete_file(file_path: str = Form(...), current_user: str = Depends(verify_token)):
@@ -1000,7 +1111,7 @@ async def webhook_delete_file(file_path: str = Form(...), current_user: str = De
 
 @app.post("/webhook/files/rename", 
           response_model=WebhookResponse,
-          tags=["🔗 Webhooks"],
+          tags=["5️⃣ Webhooks"],
           summary="Webhook File Rename",
           description="Webhook endpoint for file renaming with standardized response format.")
 async def webhook_rename_file(
@@ -1013,7 +1124,7 @@ async def webhook_rename_file(
 
 @app.post("/webhook/folders/create", 
           response_model=WebhookResponse,
-          tags=["🔗 Webhooks"],
+          tags=["5️⃣ Webhooks"],
           summary="Webhook Folder Create",
           description="Webhook endpoint for folder creation with standardized response format.")
 async def webhook_create_folder(folder: FolderCreate, current_user: str = Depends(verify_token)):
@@ -1022,7 +1133,7 @@ async def webhook_create_folder(folder: FolderCreate, current_user: str = Depend
 
 @app.post("/webhook/folders/delete", 
           response_model=WebhookResponse,
-          tags=["🔗 Webhooks"],
+          tags=["5️⃣ Webhooks"],
           summary="Webhook Folder Delete",
           description="Webhook endpoint for folder deletion with standardized response format.")
 async def webhook_delete_folder(folder_path: str = Form(...), current_user: str = Depends(verify_token)):
@@ -1031,7 +1142,7 @@ async def webhook_delete_folder(folder_path: str = Form(...), current_user: str 
 
 @app.post("/webhook/folders/rename", 
           response_model=WebhookResponse,
-          tags=["🔗 Webhooks"],
+          tags=["5️⃣ Webhooks"],
           summary="Webhook Folder Rename",
           description="Webhook endpoint for folder renaming with standardized response format.")
 async def webhook_rename_folder(rename_data: FolderRename, current_user: str = Depends(verify_token)):
@@ -1040,7 +1151,7 @@ async def webhook_rename_folder(rename_data: FolderRename, current_user: str = D
 
 @app.get("/webhook/folders/status", 
          response_model=WebhookResponse,
-         tags=["🔗 Webhooks"],
+         tags=["5️⃣ Webhooks"],
          summary="Webhook Folder Status",
          description="Webhook endpoint for folder status with standardized response format.")
 async def webhook_folder_status(folder_path: str = "", current_user: str = Depends(verify_token)):
@@ -1058,6 +1169,51 @@ async def webhook_folder_status(folder_path: str = "", current_user: str = Depen
             success=False,
             message=str(e)
         )
+
+# Custom Protected Documentation Endpoints
+# These must be defined after all other routes to ensure they override any defaults
+
+@app.get("/docs", 
+         tags=["🔒 Protected"],
+         summary="API Documentation (Protected)",
+         description="Swagger UI documentation - requires authentication.")
+async def get_docs(current_user: str = Depends(verify_token)):
+    """
+    ## 📚 Protected API Documentation
+    
+    Access to the Swagger UI documentation requires authentication.
+    
+    **Authentication**: JWT token required
+    **Use Case**: Secure API documentation access
+    """
+    from fastapi.responses import HTMLResponse
+    
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="AI Wave Rider File Manager API - Documentation",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+    )
+
+@app.get("/openapi.json", 
+         tags=["🔒 Protected"],
+         summary="OpenAPI Schema (Protected)",
+         description="OpenAPI JSON schema - requires authentication.")
+async def get_openapi_schema(current_user: str = Depends(verify_token)):
+    """
+    ## 📋 Protected OpenAPI Schema
+    
+    Access to the OpenAPI JSON schema requires authentication.
+    
+    **Authentication**: JWT token required
+    **Use Case**: Programmatic API schema access
+    """
+    return get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
 
 if __name__ == "__main__":
     import uvicorn
