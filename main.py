@@ -164,10 +164,29 @@ app = FastAPI(title="File Manager API", version="1.0.0", lifespan=lifespan)
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this properly for production
+    allow_origins=[
+        "https://drive.aiwaverider.com",
+        "https://www.drive.aiwaverider.com",
+        "https://aiwaverider.com",
+        "https://www.aiwaverider.com",
+        "https://app.aiwaverider.com",
+        "https://admin.aiwaverider.com",
+        "https://api.aiwaverider.com",
+        "http://localhost:3003",
+        "http://127.0.0.1:3003",  # Development frontend
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "X-CSRF-Token",
+        "X-API-Key",
+    ],
 )
 
 # Security
