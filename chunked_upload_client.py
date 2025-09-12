@@ -16,13 +16,39 @@ load_dotenv()
 
 # Configuration
 BASE_URL = "https://drive-backend.aiwaverider.com"
+LOGIN_URL = f"{BASE_URL}/auth/login"
 UPLOAD_CHUNK_URL = f"{BASE_URL}/webhook/files/upload-chunk"
 COMPLETE_UPLOAD_URL = f"{BASE_URL}/webhook/files/complete-chunked-upload"
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 MAX_FILE_SIZE = 250 * 1024 * 1024  # 250MB limit
 
 # Environment variables
-AIWAVERIDER_DRIVE_TOKEN = os.getenv("AIWAVERIDER_DRIVE_TOKEN")
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "admin")
+
+def get_auth_token():
+    """Get JWT token for authentication"""
+    print("🔐 Getting authentication token...")
+    
+    login_data = {
+        "username": AUTH_USERNAME,
+        "password": AUTH_PASSWORD
+    }
+    
+    try:
+        response = requests.post(LOGIN_URL, json=login_data, timeout=30)
+        print(f"Login response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            print("✅ Authentication successful")
+            return token_data["access_token"]
+        else:
+            print(f"❌ Authentication failed: {response.text}")
+            return None
+    except Exception as e:
+        print(f"❌ Authentication error: {e}")
+        return None
 
 class ChunkedUploader:
     def __init__(self, token: str):
@@ -149,8 +175,10 @@ def test_chunked_upload():
     test_file = r"E:\AIWaverider\socialmedia\Transcripe-autoDetect-Video-upload-to-gDrive\finished_videos\01_seb_intel_DNqNzwMv_F6\01_seb_intel_DNqNzwMv_F6.mp4"
     folder_path = "/videos/instagram/ai.uprise"
     
-    if not AIWAVERIDER_DRIVE_TOKEN:
-        print("❌ AIWAVERIDER_DRIVE_TOKEN not found in environment")
+    # Get authentication token
+    token = get_auth_token()
+    if not token:
+        print("❌ Cannot proceed without authentication token")
         return False
     
     if not os.path.exists(test_file):
@@ -159,7 +187,7 @@ def test_chunked_upload():
     
     try:
         # Create uploader instance
-        uploader = ChunkedUploader(AIWAVERIDER_DRIVE_TOKEN)
+        uploader = ChunkedUploader(token)
         
         # Upload the file
         result = uploader.upload_file(
@@ -185,6 +213,12 @@ def test_small_file():
     """Test with a small file first"""
     print("🧪 Testing with small file first...")
     
+    # Get authentication token
+    token = get_auth_token()
+    if not token:
+        print("❌ Cannot proceed without authentication token")
+        return False
+    
     # Create a small test file
     test_content = b"This is a test file for chunked upload verification. " * 1000  # ~50KB
     test_file_path = "test_chunked_upload.txt"
@@ -195,7 +229,7 @@ def test_small_file():
         
         print(f"📁 Created test file: {test_file_path}")
         
-        uploader = ChunkedUploader(AIWAVERIDER_DRIVE_TOKEN)
+        uploader = ChunkedUploader(token)
         result = uploader.upload_file(
             file_path=test_file_path,
             folder_path="/test",
@@ -220,12 +254,7 @@ def main():
     print("🧪 AI Wave Rider Chunked Upload Test")
     print("=" * 60)
     
-    if not AIWAVERIDER_DRIVE_TOKEN:
-        print("❌ AIWAVERIDER_DRIVE_TOKEN not found in environment")
-        print("Please set AIWAVERIDER_DRIVE_TOKEN in your .env file")
-        return
-    
-    print(f"🔑 Token loaded: {len(AIWAVERIDER_DRIVE_TOKEN)} characters")
+    print(f"🔑 Using authentication: {AUTH_USERNAME}")
     
     # Test small file first
     print("\n" + "=" * 60)
