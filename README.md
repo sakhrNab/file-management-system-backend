@@ -5,11 +5,14 @@ A FastAPI-based file management system with JWT authentication.
 ## Features
 
 - JWT-based authentication
-- File upload/download management
+- File upload/download management (up to 250MB)
+- **Chunked upload system** for large files
 - Folder creation/deletion/renaming
 - File operations (upload, download, delete, rename)
 - Webhook support for integrations
 - Docker containerization
+- **Progress tracking** for large file uploads
+- **Resumable uploads** with chunk retry capability
 
 ## Environment Variables
 
@@ -58,7 +61,9 @@ docker-compose down
 - `GET /test-auth` - Test authenticated endpoint
 
 ### File Management
-- `POST /api/files/upload` - Upload file
+- `POST /api/files/upload` - Upload file (up to 250MB)
+- `POST /api/files/upload-chunk` - Upload file chunk (for large files)
+- `POST /api/files/complete-chunked-upload` - Complete chunked upload
 - `GET /api/files/download/{file_path}` - Download file
 - `DELETE /api/files` - Delete file
 - `PUT /api/files/rename` - Rename file
@@ -72,12 +77,52 @@ docker-compose down
 
 ### Webhooks
 - `POST /webhook/files/upload` - Webhook for file upload
+- `POST /webhook/files/upload-chunk` - Webhook for chunk upload
+- `POST /webhook/files/complete-chunked-upload` - Webhook for complete upload
 - `POST /webhook/files/delete` - Webhook for file deletion
 - `POST /webhook/files/rename` - Webhook for file rename
 - `POST /webhook/folders/create` - Webhook for folder creation
 - `POST /webhook/folders/delete` - Webhook for folder deletion
 - `POST /webhook/folders/rename` - Webhook for folder rename
 - `GET /webhook/folders/status` - Webhook for folder status
+
+## Chunked Upload System
+
+For large files (>10MB), use the chunked upload system for better reliability:
+
+### How it works:
+1. **Split file** into 1MB chunks
+2. **Upload chunks** individually using `/api/files/upload-chunk`
+3. **Complete upload** by calling `/api/files/complete-chunked-upload`
+
+### Benefits:
+- **Reliability**: Resume failed uploads, retry individual chunks
+- **Progress tracking**: Real-time upload progress
+- **Large files**: Support up to 250MB
+- **Quality preservation**: Zero quality loss (bit-perfect reconstruction)
+
+### Example Usage:
+```python
+# Upload chunks
+for chunk_num in range(1, total_chunks + 1):
+    response = requests.post('/api/files/upload-chunk', 
+                           files={'file': chunk_data},
+                           data={'upload_id': upload_id, 
+                                 'chunk_number': chunk_num,
+                                 'total_chunks': total_chunks})
+
+# Complete upload
+response = requests.post('/api/files/complete-chunked-upload',
+                        json={'upload_id': upload_id,
+                              'filename': 'video.mp4',
+                              'total_chunks': total_chunks})
+```
+
+### Client Script:
+Use the provided `chunked_upload_client.py` for easy chunked uploads:
+```bash
+python chunked_upload_client.py
+```
 
 ## Authentication
 

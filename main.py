@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "uploads"))
 BASE_URL = os.getenv("BASE_URL", "https://drive.aiwaverider.com")
 
+# Upload configuration
+MAX_FILE_SIZE = 250 * 1024 * 1024  # 250MB limit
+CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+TEMP_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "temp_chunks")
+
 # JWT Authentication
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
 ALGORITHM = "HS256"
@@ -38,8 +43,9 @@ security = HTTPBearer()
 AUTH_USERNAME = os.getenv("AUTH_USERNAME")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
 
-# Ensure upload directory exists
+# Ensure upload directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
 
 # JWT Authentication functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -122,6 +128,26 @@ class WebhookResponse(BaseModel):
     message: str
     data: Optional[Dict[str, Any]] = None
 
+class ChunkUploadRequest(BaseModel):
+    filename: str
+    total_chunks: int
+    chunk_number: int
+    folder_path: str = ""
+
+class ChunkUploadResponse(BaseModel):
+    success: bool
+    message: str
+    chunk_received: int
+    total_chunks: int
+    upload_id: str
+    data: Optional[Dict[str, Any]] = None
+
+class ChunkCompleteRequest(BaseModel):
+    upload_id: str
+    filename: str
+    total_chunks: int
+    folder_path: str = ""
+
 # Initialize folder structure
 def initialize_folder_structure():
     """Initialize the predefined folder structure"""
@@ -183,14 +209,19 @@ app = FastAPI(
     8. **DELETE** `/api/folders` - Delete folders
     
     ### **Step 4: File Operations** 📄
-    9. **POST** `/api/files/upload` - Upload files
-    10. **GET** `/api/files/download/{file_path}` - Download files
-    11. **PUT** `/api/files/rename` - Rename files
-    12. **DELETE** `/api/files` - Delete files
-    13. **GET** `/api/files/list` - List all files
+    9. **POST** `/api/files/upload` - Upload files (up to 250MB)
+    10. **POST** `/api/files/upload-chunk` - Upload file chunks (for large files)
+    11. **POST** `/api/files/complete-chunked-upload` - Complete chunked upload
+    12. **GET** `/api/files/download/{file_path}` - Download files
+    13. **PUT** `/api/files/rename` - Rename files
+    14. **DELETE** `/api/files` - Delete files
+    15. **GET** `/api/files/list` - List all files
     
     ### **Step 5: Webhooks** 🔗
-    14. Use webhook endpoints for automated integrations
+    16. Use webhook endpoints for automated integrations
+    17. **POST** `/webhook/files/upload` - Webhook file upload
+    18. **POST** `/webhook/files/upload-chunk` - Webhook chunk upload
+    19. **POST** `/webhook/files/complete-chunked-upload` - Webhook complete upload
     
     ---
     
@@ -208,12 +239,22 @@ app = FastAPI(
     - **Videos**: MP4, MOV, AVI, etc.
     - **Images**: JPG, PNG, GIF, WebP, etc.
     
+    ### 📦 Chunked Upload System
+    - **Large Files**: Support for files up to 250MB
+    - **Chunk Size**: 1MB chunks for optimal performance
+    - **Reliability**: Resume failed uploads, retry individual chunks
+    - **Progress Tracking**: Real-time upload progress
+    - **Quality Preservation**: Bit-perfect reconstruction (zero quality loss)
+    - **Webhook Support**: Full webhook integration for automated workflows
+    
     ### 🔒 Security Features
     - JWT-based authentication
     - Path traversal protection
     - File type validation
+    - File size validation (250MB limit)
     - Secure file upload/download
     - Protected API documentation
+    - Automatic cleanup of temporary files
     """,
     version="1.0.0",
     lifespan=lifespan,
@@ -330,6 +371,25 @@ def get_file_info(file_path: str) -> FileInfo:
         modified=datetime.fromtimestamp(stat.st_mtime).isoformat(),
         type="file"
     )
+
+def get_chunk_path(upload_id: str, chunk_number: int) -> str:
+    """Get the path for a specific chunk file"""
+    return os.path.join(TEMP_UPLOAD_DIR, f"{upload_id}_chunk_{chunk_number}")
+
+def cleanup_chunks(upload_id: str, total_chunks: int):
+    """Clean up temporary chunk files"""
+    try:
+        for i in range(1, total_chunks + 1):
+            chunk_path = get_chunk_path(upload_id, i)
+            if os.path.exists(chunk_path):
+                os.remove(chunk_path)
+        logger.info(f"Cleaned up chunks for upload_id: {upload_id}")
+    except Exception as e:
+        logger.error(f"Error cleaning up chunks: {e}")
+
+def validate_file_size(file_size: int) -> bool:
+    """Validate if file size is within limits"""
+    return file_size <= MAX_FILE_SIZE
 
 def get_folder_contents(folder_path: str) -> FolderStatus:
     """Get folder contents including files and subfolders"""
@@ -744,6 +804,14 @@ async def upload_file(
         # Save file
         async with aiofiles.open(file_path, 'wb') as f:
             content = await file.read()
+            
+            # Validate file size
+            if not validate_file_size(len(content)):
+                raise HTTPException(
+                    status_code=413, 
+                    detail=f"File too large. Maximum size: {MAX_FILE_SIZE / (1024*1024):.0f}MB"
+                )
+            
             await f.write(content)
         
         relative_path = file_path.replace(UPLOAD_DIR, '').replace('\\', '/')
@@ -769,6 +837,208 @@ async def upload_file(
             
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Chunked Upload Endpoints
+@app.post("/api/files/upload-chunk",
+          response_model=ChunkUploadResponse,
+          tags=["4️⃣ File Management"],
+          summary="Upload File Chunk",
+          description="Upload a single chunk of a file for chunked upload process.")
+async def upload_chunk(
+    file: UploadFile = File(...),
+    upload_id: str = Form(...),
+    chunk_number: int = Form(...),
+    total_chunks: int = Form(...),
+    folder_path: str = Form(""),
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 📤 Upload File Chunk Endpoint
+    
+    Uploads a single chunk of a file as part of a chunked upload process.
+    This allows for uploading large files by breaking them into smaller pieces.
+    
+    **Form Data**:
+    - `file`: The chunk file (multipart/form-data)
+    - `upload_id`: Unique identifier for this upload session
+    - `chunk_number`: Number of this chunk (1-based)
+    - `total_chunks`: Total number of chunks for this file
+    - `folder_path`: Target folder path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `chunk_received`: Number of chunks received so far
+    - `total_chunks`: Total number of chunks expected
+    - `upload_id`: Upload session identifier
+    - `data`: Additional information
+    
+    **Use Case**: 
+    - Uploading large files (>50MB)
+    - Resumable uploads
+    - Better error handling for large files
+    - Progress tracking
+    
+    **Authentication**: JWT token required
+    **Chunk Size**: Recommended 1MB per chunk
+    **Max File Size**: 250MB total
+    """
+    try:
+        # Validate chunk number
+        if chunk_number < 1 or chunk_number > total_chunks:
+            raise HTTPException(status_code=400, detail="Invalid chunk number")
+        
+        # Generate upload ID if not provided
+        if not upload_id:
+            upload_id = str(uuid.uuid4())
+        
+        # Save chunk to temporary directory
+        chunk_path = get_chunk_path(upload_id, chunk_number)
+        
+        # Save chunk file
+        async with aiofiles.open(chunk_path, 'wb') as f:
+            content = await file.read()
+            await f.write(content)
+        
+        logger.info(f"Saved chunk {chunk_number}/{total_chunks} for upload_id: {upload_id}")
+        
+        # Check if all chunks are received
+        received_chunks = 0
+        for i in range(1, total_chunks + 1):
+            if os.path.exists(get_chunk_path(upload_id, i)):
+                received_chunks += 1
+        
+        return ChunkUploadResponse(
+            success=True,
+            message=f"Chunk {chunk_number} uploaded successfully",
+            chunk_received=received_chunks,
+            total_chunks=total_chunks,
+            upload_id=upload_id,
+            data={
+                "chunk_size": len(content),
+                "chunk_path": chunk_path
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error uploading chunk: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/files/complete-chunked-upload",
+          response_model=WebhookResponse,
+          tags=["4️⃣ File Management"],
+          summary="Complete Chunked Upload",
+          description="Combine all chunks into the final file and complete the upload process.")
+async def complete_chunked_upload(
+    request: ChunkCompleteRequest,
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 🔗 Complete Chunked Upload Endpoint
+    
+    Combines all uploaded chunks into the final file and completes the upload process.
+    This should be called after all chunks have been uploaded.
+    
+    **Request Body**:
+    - `upload_id`: Upload session identifier
+    - `filename`: Final filename for the complete file
+    - `total_chunks`: Total number of chunks
+    - `folder_path`: Target folder path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains file information (filename, path, size, url)
+    
+    **Use Case**: 
+    - Finalizing chunked uploads
+    - Combining file chunks
+    - Completing large file uploads
+    
+    **Authentication**: JWT token required
+    **File Validation**: Checks that all chunks are present
+    **Cleanup**: Automatically removes temporary chunk files
+    """
+    try:
+        # Validate that all chunks exist
+        missing_chunks = []
+        total_size = 0
+        
+        for i in range(1, request.total_chunks + 1):
+            chunk_path = get_chunk_path(request.upload_id, i)
+            if not os.path.exists(chunk_path):
+                missing_chunks.append(i)
+            else:
+                total_size += os.path.getsize(chunk_path)
+        
+        if missing_chunks:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Missing chunks: {missing_chunks}"
+            )
+        
+        # Validate total file size
+        if not validate_file_size(total_size):
+            cleanup_chunks(request.upload_id, request.total_chunks)
+            raise HTTPException(
+                status_code=413, 
+                detail=f"File too large. Maximum size: {MAX_FILE_SIZE / (1024*1024):.0f}MB"
+            )
+        
+        # Prepare target folder
+        target_folder = get_full_path(request.folder_path)
+        
+        if not is_safe_path(UPLOAD_DIR, target_folder):
+            cleanup_chunks(request.upload_id, request.total_chunks)
+            raise HTTPException(status_code=400, detail="Invalid path")
+        
+        os.makedirs(target_folder, exist_ok=True)
+        
+        # Generate unique filename if file exists
+        file_path = os.path.join(target_folder, request.filename)
+        counter = 1
+        while os.path.exists(file_path):
+            name, ext = os.path.splitext(request.filename)
+            file_path = os.path.join(target_folder, f"{name}_{counter}{ext}")
+            counter += 1
+        
+        # Combine chunks into final file
+        with open(file_path, 'wb') as final_file:
+            for i in range(1, request.total_chunks + 1):
+                chunk_path = get_chunk_path(request.upload_id, i)
+                with open(chunk_path, 'rb') as chunk_file:
+                    final_file.write(chunk_file.read())
+        
+        # Clean up temporary chunks
+        cleanup_chunks(request.upload_id, request.total_chunks)
+        
+        # Generate response data
+        relative_path = file_path.replace(UPLOAD_DIR, '').replace('\\', '/')
+        file_url = f"{BASE_URL}/api/files/download{relative_path}"
+        
+        logger.info(f"Completed chunked upload: {file_path}")
+        
+        response_data = {
+            "filename": os.path.basename(file_path),
+            "path": file_path.replace(UPLOAD_DIR, "").replace("\\", "/"),
+            "size": total_size,
+            "url": file_url,
+            "chunks_combined": request.total_chunks
+        }
+        
+        return WebhookResponse(
+            success=True,
+            message="Chunked upload completed successfully",
+            data=response_data
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error completing chunked upload: {e}")
+        # Clean up chunks on error
+        cleanup_chunks(request.upload_id, request.total_chunks)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/files/download/{file_path:path}",
@@ -1097,6 +1367,100 @@ async def webhook_rename_file(
     """Webhook for file rename"""
     return await rename_file(old_path, new_name, webhook=True)
 
+@app.post("/webhook/files/upload-chunk",
+          response_model=WebhookResponse,
+          tags=["5️⃣ Webhooks"],
+          summary="Webhook Chunk Upload",
+          description="Webhook endpoint for chunked file upload with standardized response format.")
+async def webhook_upload_chunk(
+    file: UploadFile = File(...),
+    upload_id: str = Form(...),
+    chunk_number: int = Form(...),
+    total_chunks: int = Form(...),
+    folder_path: str = Form(""),
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 🔗 Webhook Chunk Upload Endpoint
+    
+    Webhook version of chunk upload that returns a standardized webhook response format.
+    
+    **Form Data**:
+    - `file`: The chunk file (multipart/form-data)
+    - `upload_id`: Upload session identifier
+    - `chunk_number`: Number of this chunk (1-based)
+    - `total_chunks`: Total number of chunks
+    - `folder_path`: Target folder path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains chunk information and progress
+    
+    **Use Case**: 
+    - Third-party chunked upload integrations
+    - Automated large file processing
+    - External system chunk management
+    - Webhook-based chunked workflows
+    
+    **Authentication**: JWT token required
+    **Response Format**: Standardized webhook format
+    """
+    try:
+        result = await upload_chunk(file, upload_id, chunk_number, total_chunks, folder_path)
+        return WebhookResponse(
+            success=result.success,
+            message=result.message,
+            data={
+                "chunk_received": result.chunk_received,
+                "total_chunks": result.total_chunks,
+                "upload_id": result.upload_id,
+                "chunk_data": result.data
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in webhook chunk upload: {e}")
+        return WebhookResponse(
+            success=False,
+            message=str(e)
+        )
+
+@app.post("/webhook/files/complete-chunked-upload",
+          response_model=WebhookResponse,
+          tags=["5️⃣ Webhooks"],
+          summary="Webhook Complete Chunked Upload",
+          description="Webhook endpoint for completing chunked upload with standardized response format.")
+async def webhook_complete_chunked_upload(
+    request: ChunkCompleteRequest,
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 🔗 Webhook Complete Chunked Upload Endpoint
+    
+    Webhook version of complete chunked upload that returns a standardized webhook response format.
+    
+    **Request Body**:
+    - `upload_id`: Upload session identifier
+    - `filename`: Final filename for the complete file
+    - `total_chunks`: Total number of chunks
+    - `folder_path`: Target folder path (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains final file information
+    
+    **Use Case**: 
+    - Third-party chunked upload completion
+    - Automated large file finalization
+    - External system file assembly
+    - Webhook-based upload completion
+    
+    **Authentication**: JWT token required
+    **Response Format**: Standardized webhook format
+    """
+    return await complete_chunked_upload(request)
+
 @app.post("/webhook/folders/create", 
           response_model=WebhookResponse,
           tags=["5️⃣ Webhooks"],
@@ -1288,17 +1652,24 @@ async def get_docs():
     # Add custom JavaScript to handle authentication
     custom_js = """
     <script>
+        console.log('Docs page loaded');
+        
         // Check if token exists in sessionStorage
         const token = sessionStorage.getItem('api_token');
+        console.log('Token in sessionStorage:', token ? 'Found' : 'Not found');
         
         if (!token) {
+            console.log('No token found, redirecting to login');
             // Redirect to login if no token
             window.location.href = '/login';
             return;
         }
         
+        console.log('Token found, configuring Swagger UI');
+        
         // Configure Swagger UI with authentication
         window.onload = function() {
+            console.log('Window loaded, initializing Swagger UI');
             const ui = SwaggerUIBundle({
                 url: '/openapi.json',
                 dom_id: '#swagger-ui',
@@ -1307,13 +1678,16 @@ async def get_docs():
                     SwaggerUIBundle.presets.standalone
                 ],
                 requestInterceptor: function(request) {
+                    console.log('Adding authorization header to request:', request.url);
                     // Add authorization header to all requests
                     request.headers['Authorization'] = 'Bearer ' + token;
                     return request;
                 },
                 responseInterceptor: function(response) {
+                    console.log('Response received:', response.status, response.url);
                     // Handle 401 responses by redirecting to login
                     if (response.status === 401) {
+                        console.log('401 response, redirecting to login');
                         sessionStorage.removeItem('api_token');
                         window.location.href = '/login';
                     }
