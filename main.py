@@ -300,120 +300,10 @@ from fastapi.responses import JSONResponse, HTMLResponse
 @app.middleware("http")
 async def protect_docs_middleware(request: Request, call_next):
     """Middleware to protect documentation endpoints"""
+    # Skip middleware for /docs and /openapi.json - they handle auth via JavaScript
     if request.url.path in ["/docs", "/openapi.json"]:
-        # Check if Authorization header is present
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            # Check if this is a browser request (has Accept: text/html)
-            accept_header = request.headers.get("Accept", "")
-            print(f"DEBUG: Accept header: {accept_header}")
-            if "text/html" in accept_header:
-                # Return HTML login page for browser users
-                login_html = """
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>AI Wave Rider API - Authentication Required</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-                        .container { background: #f5f5f5; padding: 30px; border-radius: 10px; }
-                        .form-group { margin: 15px 0; }
-                        label { display: block; margin-bottom: 5px; font-weight: bold; }
-                        input[type="text"], input[type="password"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
-                        button { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
-                        button:hover { background: #0056b3; }
-                        .error { color: red; margin-top: 10px; }
-                        .success { color: green; margin-top: 10px; }
-                        .info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <h1>🔐 AI Wave Rider API Documentation</h1>
-                        <p>Authentication required to access the API documentation.</p>
-                        
-                        <div class="info">
-                            <strong>📋 How to access:</strong><br>
-                            1. Enter your credentials below<br>
-                            2. Click "Get Access Token"<br>
-                            3. You'll be redirected to the documentation
-                        </div>
-                        
-                        <form id="loginForm">
-                            <div class="form-group">
-                                <label for="username">Username:</label>
-                                <input type="text" id="username" name="username" value="admin" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="password">Password:</label>
-                                <input type="password" id="password" name="password" required>
-                            </div>
-                            <button type="submit">Get Access Token</button>
-                        </form>
-                        
-                        <div id="message"></div>
-                        
-                        <script>
-                            document.getElementById('loginForm').addEventListener('submit', async function(e) {
-                                e.preventDefault();
-                                const username = document.getElementById('username').value;
-                                const password = document.getElementById('password').value;
-                                const messageDiv = document.getElementById('message');
-                                
-                                try {
-                                    const response = await fetch('/auth/login', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ username, password })
-                                    });
-                                    
-                                    if (response.ok) {
-                                        const data = await response.json();
-                                        // Store token in sessionStorage
-                                        sessionStorage.setItem('api_token', data.access_token);
-                                        // Redirect to docs
-                                        window.location.href = '/docs';
-                                    } else {
-                                        const error = await response.json();
-                                        messageDiv.innerHTML = '<div class="error">❌ ' + error.detail + '</div>';
-                                    }
-                                } catch (error) {
-                                    messageDiv.innerHTML = '<div class="error">❌ Login failed: ' + error.message + '</div>';
-                                }
-                            });
-                        </script>
-                    </div>
-                </body>
-                </html>
-                """
-                return HTMLResponse(content=login_html, status_code=401)
-            else:
-                # Return JSON for API clients
-                return JSONResponse(
-                    status_code=401,
-                    content={
-                        "detail": "Authentication required to access documentation",
-                        "message": "Please authenticate first using /auth/login endpoint",
-                        "login_url": "/auth/login"
-                    }
-                )
-        
-        # Verify the token
-        try:
-            token = auth_header.split(" ")[1]
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            username: str = payload.get("sub")
-            if username is None:
-                raise HTTPException(status_code=401, detail="Invalid token")
-        except jwt.PyJWTError:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": "Invalid or expired token",
-                    "message": "Please authenticate again using /auth/login endpoint",
-                    "login_url": "/auth/login"
-                }
-            )
+        response = await call_next(request)
+        return response
     
     response = await call_next(request)
     return response
@@ -1317,28 +1207,51 @@ async def get_login_page():
             <script>
                 document.getElementById('loginForm').addEventListener('submit', async function(e) {
                     e.preventDefault();
+                    console.log('Form submitted');
+                    
                     const username = document.getElementById('username').value;
                     const password = document.getElementById('password').value;
                     const messageDiv = document.getElementById('message');
                     
+                    console.log('Username:', username);
+                    console.log('Password length:', password.length);
+                    
+                    // Show loading message
+                    messageDiv.innerHTML = '<div class="info">🔄 Authenticating...</div>';
+                    
                     try {
+                        console.log('Making request to /auth/login');
                         const response = await fetch('/auth/login', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ username, password })
                         });
                         
+                        console.log('Response status:', response.status);
+                        console.log('Response ok:', response.ok);
+                        
                         if (response.ok) {
                             const data = await response.json();
+                            console.log('Token received:', data.access_token ? 'Yes' : 'No');
+                            
                             // Store token in sessionStorage
                             sessionStorage.setItem('api_token', data.access_token);
-                            // Redirect to docs
-                            window.location.href = '/docs';
+                            console.log('Token stored in sessionStorage');
+                            
+                            // Show success message
+                            messageDiv.innerHTML = '<div class="success">✅ Authentication successful! Redirecting...</div>';
+                            
+                            // Small delay before redirect
+                            setTimeout(() => {
+                                window.location.href = '/docs';
+                            }, 1000);
                         } else {
                             const error = await response.json();
+                            console.error('Login error:', error);
                             messageDiv.innerHTML = '<div class="error">❌ ' + error.detail + '</div>';
                         }
                     } catch (error) {
+                        console.error('Fetch error:', error);
                         messageDiv.innerHTML = '<div class="error">❌ Login failed: ' + error.message + '</div>';
                     }
                 });
@@ -1353,7 +1266,7 @@ async def get_login_page():
          tags=["🔒 Protected"],
          summary="API Documentation (Protected)",
          description="Swagger UI documentation - requires authentication.")
-async def get_docs(current_user: str = Depends(verify_token)):
+async def get_docs():
     """
     ## 📚 Protected API Documentation
     
@@ -1375,30 +1288,38 @@ async def get_docs(current_user: str = Depends(verify_token)):
     # Add custom JavaScript to handle authentication
     custom_js = """
     <script>
-        // Get token from sessionStorage
+        // Check if token exists in sessionStorage
         const token = sessionStorage.getItem('api_token');
+        
+        if (!token) {
+            // Redirect to login if no token
+            window.location.href = '/login';
+            return;
+        }
         
         // Configure Swagger UI with authentication
         window.onload = function() {
-            if (token) {
-                // Add authorization header to all requests
-                ui.preauthorizeApiKey('BearerAuth', token);
-                
-                // Configure Swagger UI
-                const ui = SwaggerUIBundle({
-                    url: '/openapi.json',
-                    dom_id: '#swagger-ui',
-                    presets: [
-                        SwaggerUIBundle.presets.apis,
-                        SwaggerUIBundle.presets.standalone
-                    ],
-                    requestInterceptor: function(request) {
-                        // Add authorization header to all requests
-                        request.headers['Authorization'] = 'Bearer ' + token;
-                        return request;
+            const ui = SwaggerUIBundle({
+                url: '/openapi.json',
+                dom_id: '#swagger-ui',
+                presets: [
+                    SwaggerUIBundle.presets.apis,
+                    SwaggerUIBundle.presets.standalone
+                ],
+                requestInterceptor: function(request) {
+                    // Add authorization header to all requests
+                    request.headers['Authorization'] = 'Bearer ' + token;
+                    return request;
+                },
+                responseInterceptor: function(response) {
+                    // Handle 401 responses by redirecting to login
+                    if (response.status === 401) {
+                        sessionStorage.removeItem('api_token');
+                        window.location.href = '/login';
                     }
-                });
-            }
+                    return response;
+                }
+            });
         };
     </script>
     """
@@ -1413,7 +1334,7 @@ async def get_docs(current_user: str = Depends(verify_token)):
          tags=["🔒 Protected"],
          summary="OpenAPI Schema (Protected)",
          description="OpenAPI JSON schema - requires authentication.")
-async def get_openapi_schema(current_user: str = Depends(verify_token)):
+async def get_openapi_schema():
     """
     ## 📋 Protected OpenAPI Schema
     
