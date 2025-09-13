@@ -151,6 +151,19 @@ class ChunkCompleteRequest(BaseModel):
     total_chunks: int
     folder_path: str = ""
 
+class DuplicateFileInfo(BaseModel):
+    filename: str
+    path: str
+    size: int
+    modified: str
+    url: str
+
+class DuplicateFileResponse(BaseModel):
+    error: str
+    message: str
+    duplicate_info: DuplicateFileInfo
+    suggested_action: str
+
 # Initialize folder structure
 def initialize_folder_structure():
     """Initialize the predefined folder structure"""
@@ -212,19 +225,21 @@ app = FastAPI(
     8. **DELETE** `/api/folders` - Delete folders
     
     ### **Step 4: File Operations** 📄
-    9. **POST** `/api/files/upload` - Upload files (up to 250MB)
-    10. **POST** `/api/files/upload-chunk` - Upload file chunks (for large files)
-    11. **POST** `/api/files/complete-chunked-upload` - Complete chunked upload
-    12. **GET** `/api/files/download/{file_path}` - Download files
-    13. **PUT** `/api/files/rename` - Rename files
-    14. **DELETE** `/api/files` - Delete files
-    15. **GET** `/api/files/list` - List all files
+    9. **GET** `/api/files/check-duplicate` - Check if file exists (prevent duplicates)
+    10. **POST** `/api/files/upload` - Upload files (up to 250MB, duplicate prevention)
+    11. **POST** `/api/files/upload-chunk` - Upload file chunks (for large files)
+    12. **POST** `/api/files/complete-chunked-upload` - Complete chunked upload (duplicate prevention)
+    13. **GET** `/api/files/download/{file_path}` - Download files
+    14. **PUT** `/api/files/rename` - Rename files
+    15. **DELETE** `/api/files` - Delete files
+    16. **GET** `/api/files/list` - List all files
     
     ### **Step 5: Webhooks** 🔗
-    16. Use webhook endpoints for automated integrations
-    17. **POST** `/webhook/files/upload` - Webhook file upload
-    18. **POST** `/webhook/files/upload-chunk` - Webhook chunk upload
-    19. **POST** `/webhook/files/complete-chunked-upload` - Webhook complete upload
+    17. Use webhook endpoints for automated integrations
+    18. **POST** `/webhook/files/check-duplicate` - Webhook duplicate check
+    19. **POST** `/webhook/files/upload` - Webhook file upload
+    20. **POST** `/webhook/files/upload-chunk` - Webhook chunk upload
+    21. **POST** `/webhook/files/complete-chunked-upload` - Webhook complete upload
     
     ---
     
@@ -809,7 +824,7 @@ async def upload_file(
     
     **Authentication**: JWT token required
     **File Types**: All file types supported
-    **Duplicate Handling**: Automatic filename conflict resolution
+    **Duplicate Prevention**: Returns 409 error if file already exists
     **Path Security**: Protected against directory traversal attacks
     """
     try:
@@ -820,13 +835,35 @@ async def upload_file(
         
         os.makedirs(target_folder, exist_ok=True)
         
-        # Generate unique filename if file exists
+        # Check for duplicate file
         file_path = os.path.join(target_folder, file.filename)
-        counter = 1
-        while os.path.exists(file_path):
-            name, ext = os.path.splitext(file.filename)
-            file_path = os.path.join(target_folder, f"{name}_{counter}{ext}")
-            counter += 1
+        if os.path.exists(file_path):
+            # Get file info for duplicate
+            existing_file_info = get_file_info(file_path)
+            duplicate_response = {
+                "error": "duplicate_file",
+                "message": f"File '{file.filename}' already exists in the specified folder",
+                "duplicate_info": {
+                    "filename": existing_file_info.name,
+                    "path": existing_file_info.path,
+                    "size": existing_file_info.size,
+                    "modified": existing_file_info.modified,
+                    "url": f"{BASE_URL}/api/files/download{existing_file_info.path}"
+                },
+                "suggested_action": "Use a different filename or delete the existing file first"
+            }
+            
+            if webhook:
+                return WebhookResponse(
+                    success=False,
+                    message=f"Duplicate file detected: '{file.filename}'",
+                    data=duplicate_response
+                )
+            else:
+                raise HTTPException(
+                    status_code=409, 
+                    detail=duplicate_response
+                )
         
         # Save file
         async with aiofiles.open(file_path, 'wb') as f:
@@ -862,6 +899,9 @@ async def upload_file(
         else:
             return response_data
             
+    except HTTPException:
+        # Re-raise HTTPExceptions (like 409 for duplicates) without modification
+        raise
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -985,6 +1025,7 @@ async def complete_chunked_upload(
     
     **Authentication**: JWT token required
     **File Validation**: Checks that all chunks are present
+    **Duplicate Prevention**: Returns error if file already exists
     **Cleanup**: Automatically removes temporary chunk files
     """
     try:
@@ -1022,13 +1063,32 @@ async def complete_chunked_upload(
         
         os.makedirs(target_folder, exist_ok=True)
         
-        # Generate unique filename if file exists
+        # Check for duplicate file
         file_path = os.path.join(target_folder, request.filename)
-        counter = 1
-        while os.path.exists(file_path):
-            name, ext = os.path.splitext(request.filename)
-            file_path = os.path.join(target_folder, f"{name}_{counter}{ext}")
-            counter += 1
+        if os.path.exists(file_path):
+            # Get file info for duplicate
+            existing_file_info = get_file_info(file_path)
+            duplicate_response = {
+                "error": "duplicate_file",
+                "message": f"File '{request.filename}' already exists in the specified folder",
+                "duplicate_info": {
+                    "filename": existing_file_info.name,
+                    "path": existing_file_info.path,
+                    "size": existing_file_info.size,
+                    "modified": existing_file_info.modified,
+                    "url": f"{BASE_URL}/api/files/download{existing_file_info.path}"
+                },
+                "suggested_action": "Use a different filename or delete the existing file first"
+            }
+            
+            # Clean up chunks before returning error
+            cleanup_chunks(request.upload_id, request.total_chunks)
+            
+            return WebhookResponse(
+                success=False,
+                message=f"Duplicate file detected: '{request.filename}'",
+                data=duplicate_response
+            )
         
         # Combine chunks into final file
         with open(file_path, 'wb') as final_file:
@@ -1281,6 +1341,74 @@ async def get_folder_status(folder_path: str = "", current_user: str = Depends(v
         logger.error(f"Error getting folder status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/files/check-duplicate",
+         tags=["4️⃣ File Management"],
+         summary="Check File Duplicate",
+         description="Check if a file with the given name already exists in the specified folder.")
+async def check_file_duplicate(
+    filename: str,
+    folder_path: str = "",
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 🔍 Check File Duplicate Endpoint
+    
+    Checks if a file with the given name already exists in the specified folder.
+    Useful for preventing duplicate uploads before attempting to upload.
+    
+    **Query Parameters**:
+    - `filename`: Name of the file to check
+    - `folder_path`: Path to the folder (optional, defaults to root)
+    
+    **Response**:
+    - `exists`: Boolean indicating if file exists
+    - `file_info`: File information if exists (null if not exists)
+    - `suggested_action`: Action recommendation if file exists
+    
+    **Use Case**: 
+    - Pre-upload validation
+    - Duplicate prevention
+    - User interface feedback
+    - Upload workflow optimization
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    """
+    try:
+        target_folder = get_full_path(folder_path)
+        
+        if not is_safe_path(UPLOAD_DIR, target_folder):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        
+        if not os.path.exists(target_folder):
+            raise HTTPException(status_code=404, detail="Folder not found")
+        
+        file_path = os.path.join(target_folder, filename)
+        
+        if os.path.exists(file_path):
+            file_info = get_file_info(file_path)
+            return {
+                "exists": True,
+                "file_info": {
+                    "filename": file_info.name,
+                    "path": file_info.path,
+                    "size": file_info.size,
+                    "modified": file_info.modified,
+                    "url": f"{BASE_URL}/api/files/download{file_info.path}"
+                },
+                "suggested_action": "Use a different filename or delete the existing file first"
+            }
+        else:
+            return {
+                "exists": False,
+                "file_info": None,
+                "suggested_action": "File can be uploaded safely"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error checking file duplicate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/files/list",
          tags=["4️⃣ File Management"],
          summary="List All Files",
@@ -1514,6 +1642,53 @@ async def webhook_delete_folder(folder_path: str = Form(...), current_user: str 
 async def webhook_rename_folder(rename_data: FolderRename, current_user: str = Depends(verify_token)):
     """Webhook for folder rename"""
     return await rename_folder(rename_data)
+
+@app.post("/webhook/files/check-duplicate", 
+          response_model=WebhookResponse,
+          tags=["5️⃣ Webhooks"],
+          summary="Webhook Check Duplicate",
+          description="Webhook endpoint for checking file duplicates with standardized response format.")
+async def webhook_check_duplicate(
+    filename: str = Form(...),
+    folder_path: str = Form(""),
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 🔗 Webhook Check Duplicate Endpoint
+    
+    Webhook version of duplicate check that returns a standardized webhook response format.
+    
+    **Form Data**:
+    - `filename`: Name of the file to check
+    - `folder_path`: Path to the folder (optional, defaults to root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains duplicate check results
+    
+    **Use Case**: 
+    - Third-party duplicate checking
+    - Automated upload validation
+    - External system file management
+    - Webhook-based duplicate prevention
+    
+    **Authentication**: JWT token required
+    **Response Format**: Standardized webhook format
+    """
+    try:
+        result = await check_file_duplicate(filename, folder_path)
+        return WebhookResponse(
+            success=True,
+            message="Duplicate check completed successfully",
+            data=result
+        )
+    except Exception as e:
+        logger.error(f"Error in webhook duplicate check: {e}")
+        return WebhookResponse(
+            success=False,
+            message=str(e)
+        )
 
 @app.get("/webhook/folders/status", 
          response_model=WebhookResponse,
