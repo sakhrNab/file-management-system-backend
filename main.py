@@ -7,6 +7,9 @@ import os
 import shutil
 import aiofiles
 import json
+import logging
+import psutil
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
@@ -465,12 +468,36 @@ async def health_check():
     
     **Authentication**: None required
     """
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "version": "FIXED_VERSION_2025_09_11",
-        "upload_dir": UPLOAD_DIR
-    }
+    try:
+        # Get system resources
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(UPLOAD_DIR)
+        
+        # Count temp chunks
+        temp_chunks_count = 0
+        if os.path.exists(TEMP_UPLOAD_DIR):
+            temp_chunks_count = len([f for f in os.listdir(TEMP_UPLOAD_DIR) if f.endswith('_chunk_')])
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "version": "FIXED_VERSION_2025_09_11",
+            "upload_dir": UPLOAD_DIR,
+            "system": {
+                "memory_percent": memory.percent,
+                "memory_available_gb": round(memory.available / (1024**3), 2),
+                "disk_percent": disk.percent,
+                "disk_free_gb": round(disk.free / (1024**3), 2),
+                "temp_chunks_count": temp_chunks_count
+            }
+        }
+    except Exception as e:
+        logging.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
 @app.get("/test-auth", 
          tags=["1️⃣ Authentication"],
