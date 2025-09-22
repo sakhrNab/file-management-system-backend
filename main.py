@@ -39,8 +39,8 @@ MAX_FILE_SIZE = 250 * 1024 * 1024  # 250MB limit
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 TEMP_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "temp_chunks")
 MAX_CONCURRENT_UPLOADS = 5  # Limit concurrent uploads to prevent memory exhaustion
-MEMORY_THRESHOLD = 80  # Memory usage threshold in percentage
-MEMORY_LEAK_THRESHOLD = 85  # Threshold for memory leak detection
+MEMORY_THRESHOLD = 95  # Memory usage threshold in percentage
+MEMORY_LEAK_THRESHOLD = 98  # Threshold for memory leak detection
 
 # JWT Authentication
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
