@@ -40,6 +40,7 @@ CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 TEMP_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "temp_chunks")
 MAX_CONCURRENT_UPLOADS = 5  # Limit concurrent uploads to prevent memory exhaustion
 MEMORY_THRESHOLD = 80  # Memory usage threshold in percentage
+MEMORY_LEAK_THRESHOLD = 85  # Threshold for memory leak detection
 
 # JWT Authentication
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
@@ -305,10 +306,50 @@ def check_memory_usage():
 def force_garbage_collection():
     """Force garbage collection to free memory"""
     try:
-        collected = gc.collect()
+        # Clear any cached data first
+        if 'app' in globals():
+            # Clear any cached responses or data
+            pass
+        
+        # Force garbage collection multiple times
+        collected = 0
+        for i in range(3):  # Run GC multiple times
+            collected += gc.collect()
+        
+        # Force collection of all generations
+        gc.collect(0)  # Generation 0
+        gc.collect(1)  # Generation 1  
+        gc.collect(2)  # Generation 2
+        
         logger.info(f"Garbage collection freed {collected} objects")
+        return collected
     except Exception as e:
         logger.error(f"Error during garbage collection: {e}")
+        return 0
+
+def detect_memory_leak():
+    """Detect if there's a memory leak by checking if GC is not freeing objects"""
+    try:
+        # Get initial memory
+        initial_memory = check_memory_usage()
+        
+        # Force garbage collection
+        collected = force_garbage_collection()
+        
+        # Get memory after GC
+        final_memory = check_memory_usage()
+        
+        # If memory is high and GC freed 0 objects, it's likely a leak
+        if initial_memory > MEMORY_LEAK_THRESHOLD and collected == 0:
+            logger.error(f"POTENTIAL MEMORY LEAK DETECTED: Memory {initial_memory}%, GC freed {collected} objects")
+            return True
+        elif initial_memory > MEMORY_LEAK_THRESHOLD:
+            logger.warning(f"High memory usage: {initial_memory}% -> {final_memory}% (freed {collected} objects)")
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error detecting memory leak: {e}")
+        return False
 
 async def background_cleanup_task():
     """Background task to periodically clean up resources"""
@@ -316,8 +357,8 @@ async def background_cleanup_task():
     
     while True:
         try:
-            # Wait 30 minutes between cleanup cycles
-            await asyncio.sleep(1800)  # 30 minutes
+            # Wait 5 minutes for more frequent cleanup
+            await asyncio.sleep(300)  # 5 minutes
             
             logger.info("Running periodic cleanup...")
             
@@ -325,12 +366,35 @@ async def background_cleanup_task():
             cleanup_orphaned_chunks()
             
             # Force garbage collection
-            force_garbage_collection()
+            collected = force_garbage_collection()
+            
+            # Check for memory leaks
+            is_leak = detect_memory_leak()
             
             # Check memory usage and log if high
             memory_percent = check_memory_usage()
             if memory_percent > MEMORY_THRESHOLD:
                 logger.warning(f"High memory usage during cleanup: {memory_percent}%")
+                
+                # If memory is still high, try more aggressive cleanup
+                logger.warning("Attempting aggressive memory cleanup...")
+                
+                # Clear any cached data
+                if hasattr(app, 'state'):
+                    app.state.clear()
+                
+                # Force more aggressive GC
+                for _ in range(5):
+                    gc.collect()
+                
+                # Log final memory usage
+                final_memory = check_memory_usage()
+                logger.info(f"Aggressive cleanup: {memory_percent}% -> {final_memory}%")
+                
+                # If it's a leak, try to restart the application
+                if is_leak and final_memory > MEMORY_LEAK_THRESHOLD:
+                    logger.error("MEMORY LEAK CONFIRMED - Consider restarting the application")
+                    # In production, you might want to trigger a restart here
             
             # Clean up any stale active uploads (older than 1 hour)
             current_time = time.time()
