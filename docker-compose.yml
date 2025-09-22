@@ -19,8 +19,37 @@ services:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
     restart: unless-stopped
+    # Enhanced restart policy for 503 errors and unreachable states
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 120s
+    # Health check - more aggressive monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # Additional settings for stability
+    stop_grace_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - file_manager_network
+
 
 networks:
   file_manager_network:

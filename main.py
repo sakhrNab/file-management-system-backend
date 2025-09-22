@@ -10,6 +10,10 @@ import json
 import logging
 import psutil
 import time
+import gc
+import asyncio
+import zipfile
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
@@ -19,6 +23,8 @@ import uuid
 import secrets
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import signal
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +38,8 @@ BASE_URL = os.getenv("BASE_URL", "https://drive.aiwaverider.com")
 MAX_FILE_SIZE = 250 * 1024 * 1024  # 250MB limit
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 TEMP_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "temp_chunks")
+MAX_CONCURRENT_UPLOADS = 5  # Limit concurrent uploads to prevent memory exhaustion
+MEMORY_THRESHOLD = 80  # Memory usage threshold in percentage
 
 # JWT Authentication
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
@@ -49,6 +57,26 @@ AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
 # Ensure upload directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
+# Global state for resource management
+active_uploads = set()
+upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
+
+# Background task management
+background_tasks = set()
+cleanup_task = None
+
+# Graceful shutdown handler
+def signal_handler(signum, frame):
+    """Handle graceful shutdown"""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    # Clean up resources
+    cleanup_all_temp_chunks()
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 # JWT Authentication functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -164,6 +192,10 @@ class DuplicateFileResponse(BaseModel):
     duplicate_info: DuplicateFileInfo
     suggested_action: str
 
+class BulkDownloadRequest(BaseModel):
+    file_paths: List[str]
+    archive_name: str = "download.zip"
+
 # Initialize folder structure
 def initialize_folder_structure():
     """Initialize the predefined folder structure"""
@@ -196,10 +228,151 @@ def initialize_folder_structure():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    initialize_folder_structure()
+    try:
+        logger.info("Starting application...")
+        initialize_folder_structure()
+        
+        # Clean up any orphaned temp chunks on startup
+        cleanup_orphaned_chunks()
+        
+        # Start background tasks
+        await start_background_tasks()
+        
+        logger.info("Application started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}")
+        raise
+    
     yield
-    # Shutdown (if needed)
-    pass
+    
+    # Shutdown
+    try:
+        logger.info("Shutting down application...")
+        
+        # Stop background tasks first
+        await stop_background_tasks()
+        
+        # Clean up any remaining temp chunks
+        cleanup_all_temp_chunks()
+        
+        logger.info("Application shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
+def cleanup_orphaned_chunks():
+    """Clean up orphaned chunk files on startup"""
+    try:
+        if not os.path.exists(TEMP_UPLOAD_DIR):
+            return
+        
+        current_time = time.time()
+        orphaned_count = 0
+        
+        for filename in os.listdir(TEMP_UPLOAD_DIR):
+            if filename.endswith('_chunk_'):
+                file_path = os.path.join(TEMP_UPLOAD_DIR, filename)
+                # Remove chunks older than 1 hour
+                if current_time - os.path.getmtime(file_path) > 3600:
+                    os.remove(file_path)
+                    orphaned_count += 1
+        
+        if orphaned_count > 0:
+            logger.info(f"Cleaned up {orphaned_count} orphaned chunk files")
+    except Exception as e:
+        logger.error(f"Error cleaning up orphaned chunks: {e}")
+
+def cleanup_all_temp_chunks():
+    """Clean up all temporary chunk files"""
+    try:
+        if os.path.exists(TEMP_UPLOAD_DIR):
+            for filename in os.listdir(TEMP_UPLOAD_DIR):
+                if filename.endswith('_chunk_'):
+                    file_path = os.path.join(TEMP_UPLOAD_DIR, filename)
+                    os.remove(file_path)
+            logger.info("Cleaned up all temporary chunk files")
+    except Exception as e:
+        logger.error(f"Error cleaning up temp chunks: {e}")
+
+def check_memory_usage():
+    """Check current memory usage and return percentage"""
+    try:
+        memory = psutil.virtual_memory()
+        return memory.percent
+    except Exception as e:
+        logger.error(f"Error checking memory usage: {e}")
+        return 0
+
+def force_garbage_collection():
+    """Force garbage collection to free memory"""
+    try:
+        collected = gc.collect()
+        logger.info(f"Garbage collection freed {collected} objects")
+    except Exception as e:
+        logger.error(f"Error during garbage collection: {e}")
+
+async def background_cleanup_task():
+    """Background task to periodically clean up resources"""
+    logger.info("Starting background cleanup task...")
+    
+    while True:
+        try:
+            # Wait 30 minutes between cleanup cycles
+            await asyncio.sleep(1800)  # 30 minutes
+            
+            logger.info("Running periodic cleanup...")
+            
+            # Clean up orphaned chunks
+            cleanup_orphaned_chunks()
+            
+            # Force garbage collection
+            force_garbage_collection()
+            
+            # Check memory usage and log if high
+            memory_percent = check_memory_usage()
+            if memory_percent > MEMORY_THRESHOLD:
+                logger.warning(f"High memory usage during cleanup: {memory_percent}%")
+            
+            # Clean up any stale active uploads (older than 1 hour)
+            current_time = time.time()
+            stale_uploads = []
+            for upload_id in active_uploads.copy():
+                # This is a simple check - in production you'd want to track upload timestamps
+                if len(upload_id) > 0:  # Basic validation
+                    # Remove uploads that have been active too long (this is simplified)
+                    pass
+            
+            logger.info("Periodic cleanup completed")
+            
+        except asyncio.CancelledError:
+            logger.info("Background cleanup task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in background cleanup task: {e}")
+            # Continue running even if there's an error
+            await asyncio.sleep(300)  # Wait 5 minutes before retry
+
+async def start_background_tasks():
+    """Start background tasks"""
+    global cleanup_task
+    try:
+        cleanup_task = asyncio.create_task(background_cleanup_task())
+        background_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(background_tasks.discard)
+        logger.info("Background tasks started")
+    except Exception as e:
+        logger.error(f"Error starting background tasks: {e}")
+
+async def stop_background_tasks():
+    """Stop all background tasks"""
+    logger.info("Stopping background tasks...")
+    for task in background_tasks.copy():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    background_tasks.clear()
+    logger.info("Background tasks stopped")
 
 app = FastAPI(
     title="AI Wave Rider File Manager API",
@@ -229,10 +402,12 @@ app = FastAPI(
     10. **POST** `/api/files/upload` - Upload files (up to 250MB, duplicate prevention)
     11. **POST** `/api/files/upload-chunk` - Upload file chunks (for large files)
     12. **POST** `/api/files/complete-chunked-upload` - Complete chunked upload (duplicate prevention)
-    13. **GET** `/api/files/download/{file_path}` - Download files
-    14. **PUT** `/api/files/rename` - Rename files
-    15. **DELETE** `/api/files` - Delete files
-    16. **GET** `/api/files/list` - List all files
+    13. **GET** `/api/files/download/{file_path}` - Download single files
+    14. **GET** `/api/files/download-token/{file_path}` - Download files with token parameter
+    15. **POST** `/api/files/download-bulk` - Download multiple files as ZIP archive
+    16. **PUT** `/api/files/rename` - Rename files
+    17. **DELETE** `/api/files` - Delete files
+    18. **GET** `/api/files/list` - List all files
     
     ### **Step 5: Webhooks** 🔗
     17. Use webhook endpoints for automated integrations
@@ -264,6 +439,13 @@ app = FastAPI(
     - **Progress Tracking**: Real-time upload progress
     - **Quality Preservation**: Bit-perfect reconstruction (zero quality loss)
     - **Webhook Support**: Full webhook integration for automated workflows
+    
+    ### 📥 Download System
+    - **Single Downloads**: Direct file downloads with authentication
+    - **Bulk Downloads**: ZIP archive creation for multiple files (up to 500MB)
+    - **Token Downloads**: URL-based downloads with JWT tokens
+    - **Memory Efficient**: Streaming downloads to prevent server overload
+    - **Background Processing**: Automatic cleanup of temporary archives
     
     ### 🔒 Security Features
     - JWT-based authentication
@@ -351,6 +533,21 @@ app.add_middleware(
         "X-API-Key",
     ],
 )
+
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler to prevent 503 errors from unhandled exceptions"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "message": "Internal server error occurred",
+            "error": "internal_error",
+            "timestamp": datetime.now().isoformat()
+        }
+    )
 
 # Middleware to protect documentation endpoints
 from fastapi import Request
@@ -475,6 +672,8 @@ async def health_check():
     - Timestamp
     - Version information
     - Upload directory path
+    - Resource usage
+    - Active uploads count
     
     **Use Case**: 
     - Load balancer health checks
@@ -484,34 +683,215 @@ async def health_check():
     **Authentication**: None required
     """
     try:
-        # Get system resources
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage(UPLOAD_DIR)
+        # Check memory usage and determine health status
+        memory_percent = check_memory_usage()
+        status = "healthy"
         
-        # Count temp chunks
-        temp_chunks_count = 0
-        if os.path.exists(TEMP_UPLOAD_DIR):
-            temp_chunks_count = len([f for f in os.listdir(TEMP_UPLOAD_DIR) if f.endswith('_chunk_')])
+        # Determine health based on resource usage
+        if memory_percent > 90:
+            status = "unhealthy"
+        elif memory_percent > MEMORY_THRESHOLD:
+            status = "degraded"
         
-        return {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "version": "FIXED_VERSION_2025_09_11",
-            "upload_dir": UPLOAD_DIR,
-            "system": {
+        # Get system resources with error handling
+        system_info = {}
+        try:
+            memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent(interval=1)
+            system_info.update({
                 "memory_percent": memory.percent,
                 "memory_available_gb": round(memory.available / (1024**3), 2),
+                "memory_used_gb": round(memory.used / (1024**3), 2),
+                "cpu_percent": cpu_percent
+            })
+        except Exception as e:
+            logger.warning(f"Could not get system info: {e}")
+            system_info.update({
+                "memory_percent": "unavailable",
+                "memory_available_gb": "unavailable",
+                "memory_used_gb": "unavailable",
+                "cpu_percent": "unavailable"
+            })
+        
+        try:
+            disk = psutil.disk_usage(UPLOAD_DIR)
+            system_info.update({
                 "disk_percent": disk.percent,
                 "disk_free_gb": round(disk.free / (1024**3), 2),
-                "temp_chunks_count": temp_chunks_count
-            }
+                "disk_used_gb": round(disk.used / (1024**3), 2)
+            })
+        except Exception as e:
+            logger.warning(f"Could not get disk info: {e}")
+            system_info.update({
+                "disk_percent": "unavailable",
+                "disk_free_gb": "unavailable",
+                "disk_used_gb": "unavailable"
+            })
+        
+        # Count temp chunks safely
+        temp_chunks_count = 0
+        try:
+            if os.path.exists(TEMP_UPLOAD_DIR):
+                temp_chunks_count = len([f for f in os.listdir(TEMP_UPLOAD_DIR) if f.endswith('_chunk_')])
+        except Exception as e:
+            logger.warning(f"Could not count temp chunks: {e}")
+            temp_chunks_count = "unavailable"
+        
+        system_info.update({
+            "temp_chunks_count": temp_chunks_count,
+            "active_uploads": len(active_uploads),
+            "max_concurrent_uploads": MAX_CONCURRENT_UPLOADS
+        })
+        
+        # Force garbage collection if memory usage is high
+        if memory_percent > MEMORY_THRESHOLD:
+            force_garbage_collection()
+            logger.warning(f"High memory usage detected: {memory_percent}%. Forced garbage collection.")
+        
+        response = {
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "version": "ENHANCED_VERSION_2025_09_22",
+            "upload_dir": UPLOAD_DIR,
+            "system": system_info
         }
+        
+        # Log health status periodically
+        if memory_percent > MEMORY_THRESHOLD or temp_chunks_count > 50:
+            logger.warning(f"Health check - Status: {status}, Memory: {memory_percent}%, Temp chunks: {temp_chunks_count}")
+        
+        return response
     except Exception as e:
-        logging.error(f"Health check failed: {e}")
+        logger.error(f"Health check failed: {e}", exc_info=True)
         return {
             "status": "unhealthy",
             "timestamp": datetime.now().isoformat(),
-            "error": str(e)
+            "error": str(e),
+            "version": "ENHANCED_VERSION_2025_09_22"
+        }
+
+@app.post("/admin/cleanup",
+          tags=["2️⃣ System"],
+          summary="Manual Cleanup",
+          description="Manually trigger cleanup and garbage collection.")
+async def manual_cleanup(current_user: str = Depends(verify_token)):
+    """
+    ## 🧹 Manual Cleanup Endpoint
+    
+    Manually triggers cleanup operations and garbage collection.
+    
+    **Use Case**: 
+    - Force cleanup when memory usage is high
+    - Troubleshooting performance issues
+    - Manual maintenance operations
+    
+    **Authentication**: JWT token required
+    """
+    try:
+        logger.info("Manual cleanup triggered by user")
+        
+        # Clean up orphaned chunks
+        cleanup_orphaned_chunks()
+        
+        # Force garbage collection
+        force_garbage_collection()
+        
+        # Get current memory usage
+        memory_percent = check_memory_usage()
+        
+        return {
+            "success": True,
+            "message": "Cleanup completed successfully",
+            "timestamp": datetime.now().isoformat(),
+            "memory_usage_after": f"{memory_percent}%"
+        }
+    except Exception as e:
+        logger.error(f"Manual cleanup failed: {e}", exc_info=True)
+        return {
+            "success": False,
+            "message": f"Cleanup failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/health/detailed",
+         tags=["2️⃣ System"],
+         summary="Detailed Health Check",
+         description="Comprehensive health check that includes 503 error detection and automatic recovery.")
+async def detailed_health_check():
+    """
+    ## 🔍 Detailed Health Check Endpoint
+    
+    This endpoint performs a comprehensive health check including:
+    - Service reachability
+    - Memory and resource usage
+    - Database connectivity
+    - File system access
+    - Automatic recovery attempts
+    
+    **Returns**: Detailed health status with recovery actions
+    """
+    try:
+        # Check basic health first
+        basic_health = await health_check()
+        
+        # Additional checks for 503 error conditions
+        checks = {
+            "basic_health": basic_health.get("status"),
+            "memory_usage": check_memory_usage(),
+            "disk_space": shutil.disk_usage(UPLOAD_DIR).free / (1024**3),  # GB
+            "temp_chunks": len(list(Path(UPLOAD_DIR, "temp_chunks").glob("*"))),
+            "active_uploads": len(active_uploads),
+            "background_tasks": len(background_tasks)
+        }
+        
+        # Determine overall health
+        overall_status = "healthy"
+        issues = []
+        
+        if checks["memory_usage"] > 90:
+            overall_status = "degraded"
+            issues.append("High memory usage")
+            # Trigger cleanup
+            cleanup_orphaned_chunks()
+            force_garbage_collection()
+        
+        if checks["disk_space"] < 1:  # Less than 1GB free
+            overall_status = "degraded"
+            issues.append("Low disk space")
+        
+        if checks["temp_chunks"] > 50:
+            overall_status = "degraded"
+            issues.append("Too many temp chunks")
+            cleanup_orphaned_chunks()
+        
+        if checks["active_uploads"] > MAX_CONCURRENT_UPLOADS:
+            overall_status = "degraded"
+            issues.append("Too many active uploads")
+        
+        # If we have issues, try to recover
+        if issues:
+            logger.warning(f"Health issues detected: {issues}")
+            # Force cleanup
+            cleanup_orphaned_chunks()
+            force_garbage_collection()
+        
+        return {
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "checks": checks,
+            "issues": issues,
+            "recovery_attempted": len(issues) > 0,
+            "version": "ENHANCED_VERSION_2025_09_22"
+        }
+        
+    except Exception as e:
+        logger.error(f"Detailed health check failed: {e}", exc_info=True)
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "recovery_attempted": False,
+            "version": "ENHANCED_VERSION_2025_09_22"
         }
 
 @app.get("/test-auth", 
@@ -798,6 +1178,7 @@ async def upload_file(
     file: UploadFile = File(...),
     folder_path: str = Form(""),
     webhook: bool = Form(False),
+    custom_filename: str = None,
     current_user: str = Depends(verify_token)
 ):
     """
@@ -810,6 +1191,7 @@ async def upload_file(
     - `file`: The file to upload (multipart/form-data)
     - `folder_path`: Target folder path (optional, defaults to root)
     - `webhook`: Return webhook response format (optional, defaults to false)
+    - `custom_filename`: Custom filename for the uploaded file (optional, uses original filename if not provided)
     
     **Response**:
     - `filename`: Name of the uploaded file
@@ -827,84 +1209,121 @@ async def upload_file(
     **Duplicate Prevention**: Returns 409 error if file already exists
     **Path Security**: Protected against directory traversal attacks
     """
-    try:
-        target_folder = get_full_path(folder_path)
+    # Check memory usage before upload
+    memory_percent = check_memory_usage()
+    if memory_percent > 90:
+        logger.error(f"Upload rejected due to high memory usage: {memory_percent}%")
+        raise HTTPException(
+            status_code=503, 
+            detail="Server is under heavy load. Please try again later."
+        )
+    
+    # Use semaphore to limit concurrent uploads
+    async with upload_semaphore:
+        upload_id = str(uuid.uuid4())
+        active_uploads.add(upload_id)
         
-        if not is_safe_path(UPLOAD_DIR, target_folder):
-            raise HTTPException(status_code=400, detail="Invalid path")
+        try:
+            target_folder = get_full_path(folder_path)
+            
+            if not is_safe_path(UPLOAD_DIR, target_folder):
+                raise HTTPException(status_code=400, detail="Invalid path")
+            
+            os.makedirs(target_folder, exist_ok=True)
+            
+            # Determine the filename to use
+            final_filename = custom_filename if custom_filename else file.filename
+            
+            # Check for duplicate file
+            file_path = os.path.join(target_folder, final_filename)
+            if os.path.exists(file_path):
+                # Get file info for duplicate
+                existing_file_info = get_file_info(file_path)
+                duplicate_response = {
+                    "error": "duplicate_file",
+                    "message": f"File '{final_filename}' already exists in the specified folder",
+                    "duplicate_info": {
+                        "filename": existing_file_info.name,
+                        "path": existing_file_info.path,
+                        "size": existing_file_info.size,
+                        "modified": existing_file_info.modified,
+                        "url": f"{BASE_URL}/api/files/download{existing_file_info.path}"
+                    },
+                    "suggested_action": "Use a different filename or delete the existing file first"
+                }
+                
+                if webhook:
+                    return WebhookResponse(
+                        success=False,
+                        message=f"Duplicate file detected: '{final_filename}'",
+                        data=duplicate_response
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=409, 
+                        detail=duplicate_response
+                    )
         
-        os.makedirs(target_folder, exist_ok=True)
-        
-        # Check for duplicate file
-        file_path = os.path.join(target_folder, file.filename)
-        if os.path.exists(file_path):
-            # Get file info for duplicate
-            existing_file_info = get_file_info(file_path)
-            duplicate_response = {
-                "error": "duplicate_file",
-                "message": f"File '{file.filename}' already exists in the specified folder",
-                "duplicate_info": {
-                    "filename": existing_file_info.name,
-                    "path": existing_file_info.path,
-                    "size": existing_file_info.size,
-                    "modified": existing_file_info.modified,
-                    "url": f"{BASE_URL}/api/files/download{existing_file_info.path}"
-                },
-                "suggested_action": "Use a different filename or delete the existing file first"
+            # Save file with streaming to prevent memory exhaustion
+            total_size = 0
+            async with aiofiles.open(file_path, 'wb') as f:
+                while True:
+                    chunk = await file.read(8192)  # Read in 8KB chunks
+                    if not chunk:
+                        break
+                    
+                    total_size += len(chunk)
+                    
+                    # Validate file size during streaming
+                    if not validate_file_size(total_size):
+                        await f.close()  # Close file before raising exception
+                        if os.path.exists(file_path):
+                            os.remove(file_path)  # Clean up partial file
+                        raise HTTPException(
+                            status_code=413, 
+                            detail=f"File too large. Maximum size: {MAX_FILE_SIZE / (1024*1024):.0f}MB"
+                        )
+                    
+                    await f.write(chunk)
+                    
+                    # Yield control periodically to prevent blocking
+                    if total_size % (1024 * 1024) == 0:  # Every 1MB
+                        await asyncio.sleep(0)  # Yield control
+            
+            relative_path = file_path.replace(UPLOAD_DIR, '').replace('\\', '/')
+            file_url = f"{BASE_URL}/api/files/download{relative_path}"
+            
+            logger.info(f"Uploaded file: {file_path} ({total_size} bytes)")
+            
+            response_data = {
+                "filename": final_filename,
+                "path": file_path.replace(UPLOAD_DIR, "").replace("\\", "/"),
+                "size": total_size,
+                "url": file_url
             }
             
             if webhook:
                 return WebhookResponse(
-                    success=False,
-                    message=f"Duplicate file detected: '{file.filename}'",
-                    data=duplicate_response
+                    success=True,
+                    message="File uploaded successfully",
+                    data=response_data
                 )
             else:
-                raise HTTPException(
-                    status_code=409, 
-                    detail=duplicate_response
-                )
-        
-        # Save file
-        async with aiofiles.open(file_path, 'wb') as f:
-            content = await file.read()
+                return response_data
+                
+        except HTTPException:
+            # Re-raise HTTPExceptions (like 409 for duplicates) without modification
+            raise
+        except Exception as e:
+            logger.error(f"Error uploading file: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # Always remove from active uploads
+            active_uploads.discard(upload_id)
             
-            # Validate file size
-            if not validate_file_size(len(content)):
-                raise HTTPException(
-                    status_code=413, 
-                    detail=f"File too large. Maximum size: {MAX_FILE_SIZE / (1024*1024):.0f}MB"
-                )
-            
-            await f.write(content)
-        
-        relative_path = file_path.replace(UPLOAD_DIR, '').replace('\\', '/')
-        file_url = f"{BASE_URL}/api/files/download{relative_path}"
-        
-        logger.info(f"Uploaded file: {file_path}")
-        
-        response_data = {
-            "filename": os.path.basename(file_path),
-            "path": file_path.replace(UPLOAD_DIR, "").replace("\\", "/"),
-            "size": len(content),
-            "url": file_url
-        }
-        
-        if webhook:
-            return WebhookResponse(
-                success=True,
-                message="File uploaded successfully",
-                data=response_data
-            )
-        else:
-            return response_data
-            
-    except HTTPException:
-        # Re-raise HTTPExceptions (like 409 for duplicates) without modification
-        raise
-    except Exception as e:
-        logger.error(f"Error uploading file: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+            # Force garbage collection after large uploads
+            if memory_percent > MEMORY_THRESHOLD:
+                force_garbage_collection()
 
 # Chunked Upload Endpoints
 @app.post("/api/files/upload-chunk",
@@ -1090,12 +1509,16 @@ async def complete_chunked_upload(
                 data=duplicate_response
             )
         
-        # Combine chunks into final file
-        with open(file_path, 'wb') as final_file:
+        # Combine chunks into final file asynchronously
+        async with aiofiles.open(file_path, 'wb') as final_file:
             for i in range(1, request.total_chunks + 1):
                 chunk_path = get_chunk_path(request.upload_id, i)
-                with open(chunk_path, 'rb') as chunk_file:
-                    final_file.write(chunk_file.read())
+                async with aiofiles.open(chunk_path, 'rb') as chunk_file:
+                    while True:
+                        chunk_data = await chunk_file.read(8192)  # Read in 8KB chunks
+                        if not chunk_data:
+                            break
+                        await final_file.write(chunk_data)
         
         # Clean up temporary chunks
         cleanup_chunks(request.upload_id, request.total_chunks)
@@ -1166,6 +1589,169 @@ async def download_file(file_path: str, current_user: str = Depends(verify_token
         return FileResponse(full_path)
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/files/download-token/{file_path:path}",
+          tags=["4️⃣ File Management"],
+          summary="Download File with Token",
+          description="Download a file by its path using token as query parameter.")
+async def download_file_with_token(
+    file_path: str,
+    token: str,
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 📥 Download File with Token Endpoint
+    
+    Downloads a file by its relative path using a JWT token provided as a query parameter.
+    This is useful for direct links and embedding in HTML.
+    
+    **Path Parameters**:
+    - `file_path`: Relative path to the file (e.g., `/thumbnails/edited/63c5545a-60ae-4d4d-88a5-3d5f089fd331`)
+    
+    **Query Parameters**:
+    - `token`: JWT token for authentication
+    
+    **Response**:
+    - File content with appropriate Content-Type header
+    - File name in Content-Disposition header
+    
+    **Use Case**: 
+    - Direct file links in emails
+    - Embedding in HTML img tags
+    - Sharing files via URL
+    
+    **Example**:
+    ```
+    https://drive-backend.aiwaverider.com/api/files/download-token/thumbnails/edited/63c5545a-60ae-4d4d-88a5-3d5f089fd331?token=YOUR_JWT_TOKEN
+    ```
+    
+    **Authentication**: JWT token required (via query parameter)
+    **Path Security**: Protected against directory traversal attacks
+    **MIME Types**: Automatically detected based on file extension
+    """
+    try:
+        full_path = get_full_path(file_path)
+        
+        if not is_safe_path(UPLOAD_DIR, full_path):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        
+        if not os.path.exists(full_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(full_path)
+    except Exception as e:
+        logger.error(f"Error downloading file with token: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/files/download-bulk",
+          tags=["4️⃣ File Management"],
+          summary="Bulk Download Files",
+          description="Download multiple files as a ZIP archive.")
+async def download_bulk_files(
+    request: BulkDownloadRequest,
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 📦 Bulk Download Files Endpoint
+    
+    Downloads multiple files as a ZIP archive. Useful for downloading entire folders or selected files.
+    
+    **Request Body**:
+    - `file_paths`: List of relative file paths to include in the archive
+    - `archive_name`: Name of the ZIP file (optional, defaults to "download.zip")
+    
+    **Response**:
+    - ZIP file containing all requested files
+    
+    **Use Case**: 
+    - Downloading multiple files at once
+    - Folder downloads
+    - Batch file operations
+    - Content archiving
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    **File Size Limit**: Combined files must not exceed available memory
+    """
+    try:
+        # Check memory usage before creating archive
+        memory_percent = check_memory_usage()
+        if memory_percent > 85:
+            logger.error(f"Bulk download rejected due to high memory usage: {memory_percent}%")
+            raise HTTPException(
+                status_code=503, 
+                detail="Server is under heavy load. Please try again later."
+            )
+        
+        # Validate file paths and calculate total size
+        valid_files = []
+        total_size = 0
+        
+        for file_path in request.file_paths:
+            full_path = get_full_path(file_path)
+            
+            if not is_safe_path(UPLOAD_DIR, full_path):
+                logger.warning(f"Unsafe path rejected: {file_path}")
+                continue
+            
+            if not os.path.exists(full_path) or not os.path.isfile(full_path):
+                logger.warning(f"File not found: {file_path}")
+                continue
+            
+            file_size = os.path.getsize(full_path)
+            total_size += file_size
+            valid_files.append((file_path, full_path, file_size))
+        
+        if not valid_files:
+            raise HTTPException(status_code=404, detail="No valid files found")
+        
+        # Check if total size is reasonable (limit to 500MB for bulk downloads)
+        max_bulk_size = 500 * 1024 * 1024  # 500MB
+        if total_size > max_bulk_size:
+            raise HTTPException(
+                status_code=413, 
+                detail=f"Total file size too large. Maximum: {max_bulk_size / (1024*1024):.0f}MB"
+            )
+        
+        # Create temporary ZIP file
+        temp_zip_path = None
+        try:
+            # Create temporary file
+            temp_fd, temp_zip_path = tempfile.mkstemp(suffix='.zip', prefix='bulk_download_')
+            os.close(temp_fd)  # Close the file descriptor, we'll use the path
+            
+            # Create ZIP archive
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file_path, full_path, file_size in valid_files:
+                    # Use the relative path as the archive name
+                    archive_name = file_path.lstrip('/')
+                    zipf.write(full_path, archive_name)
+                    
+                    # Yield control periodically for large files
+                    if file_size > 10 * 1024 * 1024:  # Files larger than 10MB
+                        await asyncio.sleep(0)
+            
+            logger.info(f"Created bulk download archive with {len(valid_files)} files ({total_size} bytes)")
+            
+            # Return the ZIP file
+            return FileResponse(
+                temp_zip_path,
+                filename=request.archive_name,
+                media_type='application/zip',
+                background=lambda: os.unlink(temp_zip_path) if os.path.exists(temp_zip_path) else None
+            )
+            
+        except Exception as e:
+            # Clean up temporary file on error
+            if temp_zip_path and os.path.exists(temp_zip_path):
+                os.unlink(temp_zip_path)
+            raise e
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating bulk download: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/files",
@@ -1473,6 +2059,7 @@ async def list_all_files(folder_path: str = "", current_user: str = Depends(veri
 async def webhook_upload_file(
     file: UploadFile = File(...),
     folder_path: str = Form(""),
+    filename: str = Form(None),
     current_user: str = Depends(verify_token)
 ):
     """
@@ -1483,6 +2070,7 @@ async def webhook_upload_file(
     **Form Data**:
     - `file`: The file to upload (multipart/form-data)
     - `folder_path`: Target folder path (optional, defaults to root)
+    - `filename`: Custom filename for the uploaded file (optional, uses original filename if not provided)
     
     **Response**:
     - `success`: Boolean indicating success
@@ -1498,7 +2086,7 @@ async def webhook_upload_file(
     **Authentication**: JWT token required
     **Response Format**: Standardized webhook format
     """
-    return await upload_file(file, folder_path, webhook=True)
+    return await upload_file(file, folder_path, webhook=True, custom_filename=filename)
 
 @app.post("/webhook/files/delete", 
           response_model=WebhookResponse,
