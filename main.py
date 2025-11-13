@@ -95,11 +95,28 @@ def load_folder_visibility() -> Dict[str, bool]:
     return visibility_map
 
 def is_folder_public(folder_path: str) -> bool:
-    """Check if a folder is marked as public"""
+    """
+    Check if a folder is marked as public.
+    Returns True if the folder itself is public, or if any parent folder is public.
+    This means subfolders of public folders are automatically public.
+    """
     visibility_map = load_folder_visibility()
     # Normalize path for comparison
     normalized_path = folder_path.replace("\\", "/").strip("/")
-    return visibility_map.get(normalized_path, False)
+    
+    # Check if this exact folder is public
+    if visibility_map.get(normalized_path, False):
+        return True
+    
+    # Check if any parent folder is public (subfolders inherit public status)
+    path_parts = normalized_path.split("/")
+    for i in range(len(path_parts)):
+        # Build parent path by joining parts up to current index
+        parent_path = "/".join(path_parts[:i+1])
+        if visibility_map.get(parent_path, False):
+            return True
+    
+    return False
 
 # Global state for resource management
 active_uploads = set()
@@ -2466,6 +2483,71 @@ async def list_all_files(folder_path: str = "", current_user: str = Depends(veri
         return {"files": files, "count": len(files)}
     except Exception as e:
         logger.error(f"Error listing files: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/folders/list",
+         tags=["3️⃣ Folder Management"],
+         summary="List All Folders",
+         description="Recursively list all folders in the upload directory.")
+async def list_all_folders(folder_path: str = "", current_user: str = Depends(verify_token)):
+    """
+    ## 📁 List All Folders Endpoint
+    
+    Recursively lists all folders in the upload directory. Useful for folder selection
+    in file operations like move, copy, etc.
+    
+    **Query Parameters**:
+    - `folder_path`: Path to start listing from (optional, defaults to root)
+    
+    **Response**:
+    - `folders`: Array of folder paths (relative to upload directory)
+    - `count`: Total number of folders found
+    
+    **Use Case**: 
+    - Folder selection in file operations
+    - Building folder browsers
+    - File organization workflows
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    """
+    try:
+        full_path = get_full_path(folder_path)
+        
+        if not is_safe_path(UPLOAD_DIR, full_path):
+            raise HTTPException(status_code=400, detail="Invalid path")
+        
+        if not os.path.exists(full_path):
+            raise HTTPException(status_code=404, detail="Folder not found")
+        
+        folders = []
+        # Walk through all directories
+        for root, dirs, filenames in os.walk(full_path):
+            # Get relative path from UPLOAD_DIR
+            relative_root = os.path.relpath(root, UPLOAD_DIR)
+            # Normalize path separators
+            if relative_root == ".":
+                relative_root = ""
+            else:
+                relative_root = relative_root.replace("\\", "/")
+            
+            # Add current directory if it's not root
+            if relative_root and relative_root not in folders:
+                folders.append(relative_root)
+            
+            # Add all subdirectories
+            for dir_name in dirs:
+                subfolder_path = os.path.join(relative_root, dir_name) if relative_root else dir_name
+                subfolder_path = subfolder_path.replace("\\", "/")
+                if subfolder_path not in folders:
+                    folders.append(subfolder_path)
+        
+        # Sort folders for easier browsing
+        folders.sort()
+        
+        return {"folders": folders, "count": len(folders)}
+    except Exception as e:
+        logger.error(f"Error listing folders: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Webhook endpoints
