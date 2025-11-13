@@ -185,6 +185,10 @@ class FolderRename(BaseModel):
     new_name: str
     parent_path: str = ""
 
+class FileMove(BaseModel):
+    file_path: str
+    destination_folder: str = ""
+
 class FileInfo(BaseModel):
     name: str
     path: str
@@ -2164,6 +2168,123 @@ async def rename_file(
         logger.error(f"Error renaming file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/api/files/move",
+         tags=["4️⃣ File Management"],
+         summary="Move File",
+         description="Move a file from one folder to another.")
+async def move_file(
+    move_data: FileMove,
+    webhook: bool = False,
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 📦 Move File Endpoint
+    
+    Moves a file from its current location to a different folder.
+    
+    **Request Body**:
+    - `file_path`: Current path to the file
+    - `destination_folder`: Destination folder path (empty string for root)
+    
+    **Response**:
+    - `success`: Boolean indicating success
+    - `message`: Success/error message
+    - `data`: Contains new file path
+    
+    **Use Case**: 
+    - Organizing files across folders
+    - Content management workflows
+    - File reorganization
+    
+    **Authentication**: JWT token required
+    **Path Security**: Protected against directory traversal attacks
+    **Duplicate Prevention**: Returns error if file already exists in destination
+    """
+    try:
+        # Get source file path
+        source_full_path = get_full_path(move_data.file_path)
+        
+        # Validate source path
+        if not is_safe_path(UPLOAD_DIR, source_full_path):
+            raise HTTPException(status_code=400, detail="Invalid source path")
+        
+        if not os.path.exists(source_full_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        if not os.path.isfile(source_full_path):
+            raise HTTPException(status_code=400, detail="Path is not a file")
+        
+        # Get destination folder path
+        destination_folder = get_full_path(move_data.destination_folder)
+        
+        # Validate destination path
+        if not is_safe_path(UPLOAD_DIR, destination_folder):
+            raise HTTPException(status_code=400, detail="Invalid destination path")
+        
+        # Create destination folder if it doesn't exist
+        os.makedirs(destination_folder, exist_ok=True)
+        
+        # Get filename from source path
+        filename = os.path.basename(source_full_path)
+        
+        # Check for duplicate in destination
+        destination_file_path = os.path.join(destination_folder, filename)
+        if os.path.exists(destination_file_path):
+            existing_file_info = get_file_info(destination_file_path)
+            duplicate_response = {
+                "error": "duplicate_file",
+                "message": f"File '{filename}' already exists in destination folder",
+                "duplicate_info": {
+                    "filename": existing_file_info.name,
+                    "path": existing_file_info.path,
+                    "size": existing_file_info.size,
+                    "modified": existing_file_info.modified,
+                    "url": f"{BASE_URL}/api/files/download{existing_file_info.path}"
+                },
+                "suggested_action": "Use a different filename or delete the existing file first"
+            }
+            
+            if webhook:
+                return WebhookResponse(
+                    success=False,
+                    message=f"Duplicate file detected in destination: '{filename}'",
+                    data=duplicate_response
+                )
+            else:
+                raise HTTPException(status_code=409, detail=duplicate_response)
+        
+        # Move the file
+        os.rename(source_full_path, destination_file_path)
+        logger.info(f"Moved file from {source_full_path} to {destination_file_path}")
+        
+        # Generate response
+        relative_path = destination_file_path.replace(UPLOAD_DIR, '').replace('\\', '/')
+        if not relative_path.startswith('/'):
+            relative_path = '/' + relative_path
+        
+        if webhook:
+            return WebhookResponse(
+                success=True,
+                message=f"File moved successfully to '{move_data.destination_folder}'",
+                data={
+                    "new_path": relative_path,
+                    "filename": filename,
+                    "destination_folder": move_data.destination_folder
+                }
+            )
+        else:
+            return {
+                "message": "File moved successfully",
+                "new_path": relative_path,
+                "filename": filename
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error moving file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Status and listing endpoints
 @app.get("/api/folders/status", 
          response_model=FolderStatus,
@@ -2407,6 +2528,18 @@ async def webhook_rename_file(
 ):
     """Webhook for file rename"""
     return await rename_file(old_path, new_name, webhook=True)
+
+@app.post("/webhook/files/move",
+          response_model=WebhookResponse,
+          tags=["5️⃣ Webhooks"],
+          summary="Webhook File Move",
+          description="Webhook endpoint for moving files with standardized response format.")
+async def webhook_move_file(
+    move_data: FileMove,
+    current_user: str = Depends(verify_token)
+):
+    """Webhook for file move"""
+    return await move_file(move_data, webhook=True)
 
 @app.post("/webhook/files/upload-chunk",
           response_model=WebhookResponse,
