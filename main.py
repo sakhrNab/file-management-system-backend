@@ -742,7 +742,27 @@ def get_full_path(relative_path: str) -> str:
 
 def is_safe_path(basedir: str, path: str) -> bool:
     """Check if path is safe (no directory traversal)"""
-    return os.path.commonpath([basedir, os.path.abspath(path)]) == basedir
+    try:
+        # Resolve both paths to absolute paths
+        basedir_abs = os.path.abspath(basedir)
+        path_abs = os.path.abspath(path)
+        # Check if the resolved path is within the base directory
+        common_path = os.path.commonpath([basedir_abs, path_abs])
+        return common_path == basedir_abs
+    except ValueError:
+        # commonpath raises ValueError if paths are on different drives (Windows)
+        # In this case, check if the path starts with the base directory
+        try:
+            basedir_abs = os.path.abspath(basedir)
+            path_abs = os.path.abspath(path)
+            # Use pathlib for better cross-platform handling
+            from pathlib import Path
+            return Path(path_abs).is_relative_to(Path(basedir_abs))
+        except (AttributeError, ValueError):
+            # Fallback: check if normalized paths match
+            basedir_norm = os.path.normpath(os.path.abspath(basedir))
+            path_norm = os.path.normpath(os.path.abspath(path))
+            return path_norm.startswith(basedir_norm + os.sep) or path_norm == basedir_norm
 
 def get_file_info(file_path: str) -> FileInfo:
     """Get file information"""
@@ -1816,10 +1836,30 @@ async def download_public_video(file_path: str):
         normalized_file_path = file_path.replace("\\", "/").lstrip("/")
         logger.info(f"Public video request - original file_path: '{file_path}', normalized: '{normalized_file_path}'")
         
-        # Check if path is within videos folder
-        if normalized_file_path.startswith("videos/"):
+        # Remove any "videos/public/" prefix if present (handles cases where full path is included)
+        if normalized_file_path.startswith("videos/public/"):
+            normalized_file_path = normalized_file_path[14:]  # Remove "videos/public/" prefix
+            logger.info(f"Removed videos/public/ prefix, new normalized: '{normalized_file_path}'")
+        elif normalized_file_path.startswith("videos/"):
             normalized_file_path = normalized_file_path[7:]  # Remove "videos/" prefix if present
             logger.info(f"Removed videos/ prefix, new normalized: '{normalized_file_path}'")
+        
+        # Remove "videos/public/" from anywhere in the path (handles malformed URLs with duplicate paths)
+        # This handles cases like "thumbnails/videos/public/thumbnails/file.png" -> "thumbnails/file.png"
+        if "/videos/public/" in normalized_file_path:
+            # Find the last occurrence and extract everything after it
+            parts = normalized_file_path.split("/videos/public/")
+            if len(parts) > 1:
+                # Take everything after the last "/videos/public/" occurrence
+                normalized_file_path = parts[-1]
+                logger.info(f"Removed /videos/public/ from path, new normalized: '{normalized_file_path}'")
+            else:
+                normalized_file_path = normalized_file_path.replace("/videos/public/", "/")
+                logger.info(f"Removed /videos/public/ from path, new normalized: '{normalized_file_path}'")
+        # Also handle if it appears at the start after previous processing
+        if normalized_file_path.startswith("videos/public/"):
+            normalized_file_path = normalized_file_path[14:]
+            logger.info(f"Removed videos/public/ prefix (second pass), new normalized: '{normalized_file_path}'")
         
         # Get the folder path (parent directory of the file)
         path_parts = normalized_file_path.split("/")
