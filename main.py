@@ -23,8 +23,12 @@ import uuid
 import secrets
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from dotenv import load_dotenv
 import signal
 import sys
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -58,6 +62,44 @@ AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
 # Ensure upload directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
+# Folder visibility management - uses ONLY environment variables (.env)
+# Configure PUBLIC_FOLDERS in .env file or Coolify environment variables
+def load_folder_visibility() -> Dict[str, bool]:
+    """
+    Load folder visibility settings from environment variable PUBLIC_FOLDERS.
+    Format: Comma-separated list of folder paths (e.g., "videos/public,videos/instagram/ai.waverider")
+    """
+    visibility_map = {}
+    
+    # Read from environment variable PUBLIC_FOLDERS
+    public_folders_env = os.getenv("PUBLIC_FOLDERS", "").strip()
+    if public_folders_env:
+        # Parse comma-separated list of public folders
+        public_folders = [folder.strip() for folder in public_folders_env.split(",") if folder.strip()]
+        
+        for folder_path in public_folders:
+            normalized_path = folder_path.replace("\\", "/").strip("/")
+            # Validate that only videos folder can be public
+            if normalized_path.startswith("videos"):
+                visibility_map[normalized_path] = True
+                logger.info(f"Set folder '{normalized_path}' as public from PUBLIC_FOLDERS env var")
+            else:
+                logger.warning(f"Skipping '{normalized_path}' from PUBLIC_FOLDERS - only videos folders can be public")
+        
+        if public_folders:
+            logger.info(f"Loaded {len(public_folders)} public folders from PUBLIC_FOLDERS environment variable")
+    else:
+        logger.info("PUBLIC_FOLDERS environment variable not set - no public folders configured")
+    
+    return visibility_map
+
+def is_folder_public(folder_path: str) -> bool:
+    """Check if a folder is marked as public"""
+    visibility_map = load_folder_visibility()
+    # Normalize path for comparison
+    normalized_path = folder_path.replace("\\", "/").strip("/")
+    return visibility_map.get(normalized_path, False)
 
 # Global state for resource management
 active_uploads = set()
@@ -203,7 +245,8 @@ def initialize_folder_structure():
     structure = {
         "videos": {
             "instagram": ["ai.waverider", "ai.wave.rider", "ai.uprise"],
-            "tiktok": ["ai.waverider", "ai.wave.rider", "aiwaverider9", "health"]
+            "tiktok": ["ai.waverider", "ai.wave.rider", "aiwaverider9", "health"],
+            "public": []  # Public videos folder - visibility controlled by PUBLIC_FOLDERS env var
         },
         "images": {
             "instagram": ["ai.waverider", "ai.wave.rider", "ai.uprise"],
@@ -219,9 +262,19 @@ def initialize_folder_structure():
             platform_path = os.path.join(main_path, platform)
             os.makedirs(platform_path, exist_ok=True)
             
-            for account in accounts:
-                account_path = os.path.join(platform_path, account)
-                os.makedirs(account_path, exist_ok=True)
+            # Handle public folder specially (it has empty accounts list)
+            if platform == "public" and main_folder == "videos":
+                # Public folder is created - visibility is controlled by PUBLIC_FOLDERS env var
+                public_folder_path = "videos/public"
+                if is_folder_public(public_folder_path):
+                    logger.info(f"Public folder '{public_folder_path}' configured via PUBLIC_FOLDERS env var")
+                else:
+                    logger.info(f"Created '{public_folder_path}' folder - set PUBLIC_FOLDERS env var to make it public")
+            else:
+                # Create account folders
+                for account in accounts:
+                    account_path = os.path.join(platform_path, account)
+                    os.makedirs(account_path, exist_ok=True)
     
     logger.info("Folder structure initialized successfully")
 
@@ -493,8 +546,29 @@ app = FastAPI(
     - **TikTok**: ai.waverider, ai.wave.rider, aiwaverider9, health
     
     ### 📂 Content Types
-    - **Videos**: MP4, MOV, AVI, etc.
+    - **Videos**: MP4, MOV, AVI, WebM, MKV, FLV, WMV, 3GP
     - **Images**: JPG, PNG, GIF, WebP, etc.
+    
+    ### 🎥 Video Operations
+    All video operations use the standard file management endpoints:
+    - **Upload Videos**: `POST /api/files/upload` (up to 250MB)
+    - **Large Video Upload**: Use chunked upload (`/api/files/upload-chunk` + `/api/files/complete-chunked-upload`)
+    - **Download Videos**: `GET /api/files/download/{file_path}` (requires authentication)
+    - **Public Video Download**: `GET /videos/public/{file_path}` (no authentication required)
+    - **Check Duplicate**: `GET /api/files/check-duplicate` (before uploading)
+    - **Video Paths**: `/videos/{platform}/{account}/filename.mp4`
+      - Platforms: `instagram`, `tiktok`
+      - Accounts: See supported platforms above
+    
+    ### 🌐 Public Video Access
+    - **Public Folder**: `videos/public/` - Automatically created on startup
+    - **Check Visibility**: `GET /api/folders/visibility` - Check if folder is public
+    - **Configure Public Folders**: Set `PUBLIC_FOLDERS` environment variable (e.g., `PUBLIC_FOLDERS=videos/public`)
+    - **Public Endpoint**: `GET /videos/public/{file_path}` - Access videos without authentication
+      - Example: `/videos/public/public/video.mp4` (for files in videos/public/)
+      - Example: `/videos/public/instagram/ai.waverider/video.mp4` (if folder is marked public)
+    - **Restriction**: Only folders under `/videos/` can be made public
+    - **Security**: Other folders (images, etc.) remain private and require authentication
     
     ### 📦 Chunked Upload System
     - **Large Files**: Support for files up to 250MB
@@ -558,12 +632,21 @@ def custom_openapi():
     }
     
     # Add security requirement to all protected endpoints
+    # Exclude public endpoints from requiring authentication
+    public_paths = ["/videos/public/", "/health", "/", "/auth/login", "/test-simple", "/debug/env"]
+    
     for path in openapi_schema["paths"]:
         for method in openapi_schema["paths"][path]:
             if method in ["get", "post", "put", "delete", "patch"]:
                 endpoint = openapi_schema["paths"][path][method]
-                if "tags" in endpoint and "🔒 Protected" in endpoint.get("tags", []):
+                # Skip public endpoints
+                is_public = any(public_path in path for public_path in public_paths)
+                if not is_public and "tags" in endpoint and "🔒 Protected" in endpoint.get("tags", []):
                     endpoint["security"] = [{"BearerAuth": []}]
+                elif not is_public and path not in ["/health", "/", "/auth/login", "/test-simple", "/debug/env"]:
+                    # Add security to all non-public endpoints except the ones explicitly listed
+                    if "/videos/public/" not in path:
+                        endpoint["security"] = [{"BearerAuth": []}]
     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
@@ -1233,6 +1316,51 @@ async def rename_folder(rename_data: FolderRename, current_user: str = Depends(v
         logger.error(f"Error renaming folder: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/folders/visibility",
+         tags=["3️⃣ Folder Management"],
+         summary="Get Folder Visibility Status",
+         description="Check if a folder is public or private based on PUBLIC_FOLDERS environment variable.")
+async def get_folder_visibility(
+    folder_path: str,
+    current_user: str = Depends(verify_token)
+):
+    """
+    ## 🔍 Get Folder Visibility Status Endpoint
+    
+    Checks whether a folder is currently set to public or private.
+    Visibility is controlled via PUBLIC_FOLDERS environment variable.
+    
+    **Query Parameters**:
+    - `folder_path`: Path to the folder (relative to upload directory)
+      - Example: `videos/instagram/ai.waverider`
+      - Example: `videos/public`
+    
+    **Response**:
+    - `folder_path`: The folder path
+    - `is_public`: Boolean indicating if folder is public
+    - `public_url`: Public access URL (if public, null if private)
+    
+    **Use Case**: 
+    - Checking folder visibility status
+    - Verifying public access configuration
+    - Debugging public video access issues
+    
+    **Authentication**: JWT token required
+    **Configuration**: Set PUBLIC_FOLDERS environment variable to configure public folders
+    """
+    try:
+        normalized_path = folder_path.replace("\\", "/").strip("/")
+        is_public = is_folder_public(normalized_path)
+        
+        return {
+            "folder_path": normalized_path,
+            "is_public": is_public,
+            "public_url": f"{BASE_URL}/videos/public/{normalized_path.replace('videos/', '')}" if is_public and normalized_path.startswith("videos/") else None
+        }
+    except Exception as e:
+        logger.error(f"Error getting folder visibility: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # File Management
 @app.post("/api/files/upload",
           tags=["4️⃣ File Management"],
@@ -1613,6 +1741,112 @@ async def complete_chunked_upload(
         logger.error(f"Error completing chunked upload: {e}")
         # Clean up chunks on error
         cleanup_chunks(request.upload_id, request.total_chunks)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Public Video Endpoint (No Authentication Required)
+@app.get("/videos/public/{file_path:path}",
+         tags=["6️⃣ Public Videos"],
+         summary="Public Video Download",
+         description="Download videos from public folders without authentication. Only folders marked as public via PUBLIC_FOLDERS env var are accessible.")
+async def download_public_video(file_path: str):
+    """
+    ## 🌐 Public Video Download Endpoint
+    
+    Downloads videos from folders that have been marked as public via PUBLIC_FOLDERS environment variable.
+    **No authentication required** - this endpoint is publicly accessible.
+    
+    **Path Parameters**:
+    - `file_path`: Relative path to the video file within the videos folder
+      - Example for public folder: `public/video.mp4` (files in `videos/public/`)
+      - Example for platform folders: `instagram/ai.waverider/video.mp4` (if folder is marked public)
+      - Full paths: `/videos/public/video.mp4` or `/videos/instagram/ai.waverider/video.mp4`
+    
+    **Public Video Download Examples**:
+    ```bash
+    # Download from public folder (if PUBLIC_FOLDERS=videos/public)
+    curl -X GET "https://drive.aiwaverider.com/videos/public/public/video.mp4" \\
+      --output video.mp4
+    
+    # Download from platform folder (if PUBLIC_FOLDERS includes the folder)
+    curl -X GET "https://drive.aiwaverider.com/videos/public/instagram/ai.waverider/video.mp4" \\
+      --output video.mp4
+    ```
+    
+    **Response**:
+    - Video file content with appropriate Content-Type header
+    - File name in Content-Disposition header
+    - Video MIME types: `video/mp4`, `video/quicktime`, etc.
+    
+    **Use Case**: 
+    - Public video sharing
+    - Embedding videos in websites
+    - Direct video access without authentication
+    - CDN-like video serving
+    
+    **Authentication**: None required (public endpoint)
+    **Security**: Only folders listed in PUBLIC_FOLDERS environment variable are accessible
+    **Path Security**: Protected against directory traversal attacks
+    **Restriction**: Only works for files under `/videos/` folder
+    """
+    try:
+        # Construct full path within videos folder
+        # file_path should be relative to videos folder (e.g., "instagram/ai.waverider/video.mp4" or "public/video.mp4")
+        normalized_file_path = file_path.replace("\\", "/").lstrip("/")
+        
+        # Check if path is within videos folder
+        if normalized_file_path.startswith("videos/"):
+            normalized_file_path = normalized_file_path[7:]  # Remove "videos/" prefix if present
+        
+        # Get the folder path (parent directory of the file)
+        path_parts = normalized_file_path.split("/")
+        
+        # Handle different path formats:
+        # 1. Files directly in public folder: "public/video.mp4" or just "video.mp4" (if in public)
+        # 2. Files in platform/account folders: "instagram/ai.waverider/video.mp4"
+        
+        if len(path_parts) == 1:
+            # Single filename - assume it's in the public folder
+            folder_path = "public"
+            normalized_file_path = f"public/{normalized_file_path}"
+        elif len(path_parts) == 2 and path_parts[0] == "public":
+            # File in public folder: "public/video.mp4"
+            folder_path = "public"
+        elif len(path_parts) >= 2:
+            # File in platform/account structure: "instagram/ai.waverider/video.mp4"
+            folder_path_parts = path_parts[:-1]
+            folder_path = "/".join(folder_path_parts)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid video path format. Expected: platform/account/filename.mp4 or public/filename.mp4")
+        
+        # Check if folder is public
+        full_folder_path = f"videos/{folder_path}"
+        if not is_folder_public(full_folder_path):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Folder '{full_folder_path}' is not public. Set PUBLIC_FOLDERS environment variable to make it public."
+            )
+        
+        # Construct full file path
+        full_file_path = os.path.join(UPLOAD_DIR, "videos", normalized_file_path)
+        
+        # Security check
+        if not is_safe_path(os.path.join(UPLOAD_DIR, "videos"), full_file_path):
+            raise HTTPException(status_code=400, detail="Invalid path - directory traversal detected")
+        
+        if not os.path.exists(full_file_path):
+            raise HTTPException(status_code=404, detail="Video file not found")
+        
+        # Verify it's actually a file (not a directory)
+        if not os.path.isfile(full_file_path):
+            raise HTTPException(status_code=400, detail="Path points to a directory, not a file")
+        
+        logger.info(f"Public video download: {full_file_path}")
+        return FileResponse(full_file_path)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading public video: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/files/download/{file_path:path}",
