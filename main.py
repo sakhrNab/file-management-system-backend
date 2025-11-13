@@ -1812,35 +1812,49 @@ async def download_public_video(file_path: str):
     try:
         # Construct full path within videos folder
         # file_path should be relative to videos folder (e.g., "instagram/ai.waverider/video.mp4" or "public/video.mp4")
+        # OR it could be a subfolder path like "thumbnails/file.png" which means "public/thumbnails/file.png"
         normalized_file_path = file_path.replace("\\", "/").lstrip("/")
+        logger.info(f"Public video request - original file_path: '{file_path}', normalized: '{normalized_file_path}'")
         
         # Check if path is within videos folder
         if normalized_file_path.startswith("videos/"):
             normalized_file_path = normalized_file_path[7:]  # Remove "videos/" prefix if present
+            logger.info(f"Removed videos/ prefix, new normalized: '{normalized_file_path}'")
         
         # Get the folder path (parent directory of the file)
         path_parts = normalized_file_path.split("/")
+        logger.info(f"Path parts: {path_parts}, length: {len(path_parts)}")
         
         # Handle different path formats:
         # 1. Files directly in public folder: "public/video.mp4" or just "video.mp4" (if in public)
-        # 2. Files in platform/account folders: "instagram/ai.waverider/video.mp4"
+        # 2. Files in public subfolders: "public/thumbnails/video.png" or "thumbnails/video.png"
+        # 3. Files in platform/account folders: "instagram/ai.waverider/video.mp4"
         
         if len(path_parts) == 1:
             # Single filename - assume it's in the public folder
             folder_path = "public"
             normalized_file_path = f"public/{normalized_file_path}"
-        elif len(path_parts) == 2 and path_parts[0] == "public":
-            # File in public folder: "public/video.mp4"
-            folder_path = "public"
-        elif len(path_parts) >= 2:
-            # File in platform/account structure: "instagram/ai.waverider/video.mp4"
+            logger.info(f"Single filename case - folder_path: '{folder_path}'")
+        elif path_parts[0] == "public":
+            # File is in public folder or its subfolders: "public/video.mp4" or "public/thumbnails/video.png"
+            # Get all parts except the filename
             folder_path_parts = path_parts[:-1]
-            folder_path = "/".join(folder_path_parts)
+            folder_path = "/".join(folder_path_parts)  # This will be "public" or "public/thumbnails" etc.
+            logger.info(f"Public folder case - folder_path: '{folder_path}'")
+        elif len(path_parts) >= 2:
+            # Since this endpoint is /videos/public/, any path here is assumed to be a subfolder of public
+            # Prepend "public/" to the path to handle cases like "thumbnails/file.png" -> "public/thumbnails/file.png"
+            logger.info(f"Entering subfolder case - path_parts: {path_parts}, path_parts[:-1]: {path_parts[:-1]}")
+            folder_path_parts = ["public"] + path_parts[:-1]
+            folder_path = "/".join(folder_path_parts)  # e.g., "public/thumbnails"
+            normalized_file_path = "/".join(["public"] + path_parts)  # e.g., "public/thumbnails/file.png"
+            logger.info(f"Subfolder case - folder_path_parts: {folder_path_parts}, folder_path: '{folder_path}', normalized_file_path: '{normalized_file_path}'")
         else:
             raise HTTPException(status_code=400, detail="Invalid video path format. Expected: platform/account/filename.mp4 or public/filename.mp4")
         
         # Check if folder is public
         full_folder_path = f"videos/{folder_path}"
+        logger.info(f"Checking public access for folder: '{full_folder_path}', original file_path was: '{file_path}'")
         if not is_folder_public(full_folder_path):
             raise HTTPException(
                 status_code=403,
